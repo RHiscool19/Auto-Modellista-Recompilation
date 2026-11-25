@@ -8,20 +8,21 @@ The game's x86 code is translated ahead of time into C and compiled with MSVC. T
 
 ## Status
 
-Early bring-up. The game boots, runs its menus and starts a race, but slowly. A full race has not been completed yet.
+Alpha. The game boots, runs its menus at full speed on the GPU renderer and starts a race, but races are still very slow. A full race has not been completed yet.
 
-| Area | State |
-|---|---|
-| Boot, ESRB / logos / intro movie | ✅ |
-| Title screen, menus, save create / load | ✅ |
-| Controller (XInput pads via the emulated USB controller), rumble | ✅ |
-| Audio (music, sound effects) | ✅ with stutter |
-| Arcade → single race → car select (3D car preview) | ✅ |
-| In race (Suzuka tested) | ✅ runs, 2–3 fps |
-| Car shading | ❌ car bodies often render black, flicker to correct colours |
-| Alpha-tested scenery (trees, fences) | ⚠️ drawn as dithered dots |
-| Save / load dialog background | ⚠️ drawn as striped garbage |
-| Performance | ❌ rendering is on the CPU; optimized builds in progress |
+There are two renderers. The **D3D11 renderer** (`run.ps1 -D3D11`) draws on the GPU and is the one to use. The original **CPU renderer** (the default) is kept as a reference and is much slower.
+
+| Area | D3D11 renderer | CPU renderer |
+|---|---|---|
+| Boot, ESRB / logos / intro movie | ✅ (ESRB fade covers only part of the screen) | ✅ |
+| Title screen, menus, save create / load | ✅ ~60 fps | ✅ 10–15 fps |
+| Arcade → single race → car select (3D car preview) | ✅ | ✅ |
+| Textures, transparency, sky | ✅ | ⚠️ alpha-tested scenery dithered, striped dialog background |
+| Car shading | ✅ correct colours | ❌ black / flickering |
+| In race (Suzuka tested) | ⚠️ renders correctly, ~3 fps | ⚠️ 2–3 fps |
+| Menu description text | ⚠️ some letters missing | ✅ |
+| Controller (XInput pads via the emulated USB controller), rumble | ✅ | ✅ |
+| Audio (music, sound effects) | ✅ with stutter | ✅ with stutter |
 
 See [`NOTES.md`](NOTES.md) for the detailed bring-up log: XBE facts, addresses, every fix and why.
 
@@ -111,10 +112,10 @@ An optimized build takes a while. If it sits on one generated file for more than
 ### 4. Run
 
 ```
-powershell -ExecutionPolicy Bypass -File .\scripts\run.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\run.ps1 -D3D11
 ```
 
-Plug in the controller before starting. Logs are written to `C:\AMRecomp\work\run_out.log` and `run_err.log`.
+`-D3D11` uses the GPU renderer. Leave it off for the CPU renderer. Plug in the controller before starting. Logs are written to `C:\AMRecomp\work\run_out.log` and `run_err.log`.
 
 `run.ps1` sets the runtime settings this game needs:
 
@@ -125,7 +126,9 @@ Plug in the controller before starting. Logs are written to `C:\AMRecomp\work\ru
 | `RECOMP_TITLE_KEVENTS=1` | CRI builds its own kernel events; without host events every wait fails instantly and spins |
 | `RECOMP_GUEST_CPUS=0` | CRI schedules its threads with suspend/resume and assumes the Xbox's single CPU |
 | `RECOMP_PB_EXEC=1` | Executes the game's GPU command stream so frames are drawn |
-| `RECOMP_FB_WINDOW=1` | Opens the game window |
+| `AM_D3D11=1` | With `-D3D11`: draws through the D3D11 renderer in `src/d3d11_backend.c`, in its own window |
+| `RECOMP_STRIP_ALT_WINDING=1` | With `-D3D11`: sends every triangle of a strip with the winding the hardware uses, so back-face culling keeps them all |
+| `RECOMP_FB_WINDOW=1` | Without `-D3D11`: shows the CPU-rendered frame buffer in a window |
 | `RECOMP_USB=1` | The game's own input library talks to the Xbox USB controller; this emulates it and feeds it XInput pads |
 | `RECOMP_CONTIG_AVOID_IMAGE=1` | Keeps GPU/USB memory clear of the game image's address range, which the USB model depends on |
 
@@ -137,18 +140,22 @@ Plug in the controller before starting. Logs are written to `C:\AMRecomp\work\ru
 |---|---|
 | `src/main.c` | Host entry point: loads the XBE, sets up memory, kernel, audio, USB, then calls the game's entry point |
 | `src/am_overrides.c` | Hand-written replacements for specific game functions |
+| `src/d3d11_backend.c` | GPU renderer: takes the decoded GPU commands and draws them with Direct3D 11 |
 | `src/recomp_manual.c` | Indirect-call overrides and diagnostics (from the toolkit template) |
 | `src/recomp/gen/` | Generated code (git-ignored; created by `regen.ps1`) |
 | `config/seed_functions.json` | Function entry points the disassembler misses, found by running the game |
 | `scripts/regen.ps1` | Runs the recompilation pipeline |
 | `scripts/run.ps1` | Runs the game with the right runtime settings and logging |
+| `scripts/apply-patches.ps1` | Applies `patches/` to the toolkit submodule |
+| `patches/xboxrecomp-automodellista.patch` | This project's changes to the toolkit (renderer interface, vertex cache, diagnostics) |
 | `external/xboxrecomp` | The toolkit (git submodule) |
 | `NOTES.md` | Bring-up log |
 
 ## Known issues
 
-- **Performance.** Menus run at about 10 fps and races at 2–3 fps. All rendering currently goes through the toolkit's CPU rasteriser, and the generated code was built without optimization during bring-up.
-- **Black cars.** Car bodies often render black and flicker to their correct colours. The prime suspect is a bring-up shortcut in the Direct3D fence wait (see `NOTES.md`), not the shaders themselves.
+- **Race performance.** Races run at about 3 fps on either renderer. The D3D11 renderer draws the same track at 30–60 fps during the pre-race camera pan, so drawing is not the limit; the cost is on the CPU side while racing and is being investigated (see `NOTES.md`).
+- **CPU renderer.** Menus at 10–15 fps, car bodies render black. Use `-D3D11`.
+- **Small D3D11 glitches.** The ESRB logo fade covers only part of the screen; some letters are missing from menu description text.
 - **Occasional crash at startup** in the USB interrupt path, likely a timing race. Relaunching works.
 - **Xbox Live** features are not supported.
 
