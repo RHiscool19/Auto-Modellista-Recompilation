@@ -188,3 +188,10 @@ Analysis output lives outside the repo in `C:\AMRecomp\work\` (derived from game
   Hypothesis: the CPU fills it. Back end now samples guest memory when its hash changed
   more recently than the last GPU draw into that target (stats line reports `guest N`).
 - Race still ~4 fps: CPU side (pushbuffer decode, VSH interpreter, clipping) dominates.
+- FIXED black menus: targets were recreated whenever the clip rect shrank (menus narrow it per
+  panel) and every clear wiped the whole target. Now: grow-only targets sized clip_x+w, draws
+  scissored to the clip rect, clears limited to CLEAR_RECT via ID3D11DeviceContext1::ClearView
+  (Nv2aSurface gained clip_x/clip_y/clear_*). Sky came back with it. Menus 60 fps.
+- Remaining visual nits: ESRB fade shows in a region not full screen (partial depth clears are
+  skipped; or blend/clip); some menu text glyphs missing (m, p, y, w, k in descriptions).
+- Race: still ~3 fps vs 30-60 in the pre-race pan of the same scene -> CPU/game-side, profile next.

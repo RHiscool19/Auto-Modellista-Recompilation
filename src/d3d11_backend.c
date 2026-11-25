@@ -31,7 +31,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#include <d3d11.h>
+#include <d3d11_1.h>
 #include <dxgi.h>
 #include <d3dcompiler.h>
 #include <stdint.h>
@@ -63,6 +63,9 @@ static ID3D11PixelShader  *s_ps, *s_blit_ps;
 static ID3D11InputLayout  *s_layout;
 static ID3D11Buffer       *s_vb, *s_cb;
 static ID3D11RasterizerState *s_rs;
+static ID3D11RasterizerState *s_rs_scissor;   /* draws: clipped to the surface clip */
+static ID3D11DeviceContext1  *s_ctx1;         /* ClearView, for partial clears */
+static const GUID s_iid_ctx1 = { 0xbb2c6faa, 0xb5fb, 0x4082, { 0x8e, 0x6b, 0x38, 0x8b, 0x8c, 0xfa, 0x90, 0xe1 } };
 static ID3D11SamplerState *s_blit_sampler;
 
 #define VB_VERTS 262144u           /* ring capacity in vertices (7 MB) */
@@ -243,6 +246,10 @@ static int init(void)
     rd.CullMode = D3D11_CULL_NONE;
     rd.DepthClipEnable = TRUE;
     ID3D11Device_CreateRasterizerState(s_dev, &rd, &s_rs);
+    rd.ScissorEnable = TRUE;
+    ID3D11Device_CreateRasterizerState(s_dev, &rd, &s_rs_scissor);
+    if (FAILED(ID3D11DeviceContext_QueryInterface(s_ctx, &s_iid_ctx1, (void **)&s_ctx1)))
+        s_ctx1 = NULL;
 
     memset(&smp, 0, sizeof smp);
     smp.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
@@ -250,7 +257,7 @@ static int init(void)
     smp.MaxLOD = D3D11_FLOAT32_MAX;
     ID3D11Device_CreateSamplerState(s_dev, &smp, &s_blit_sampler);
 
-    if (!s_vs || !s_ps || !s_blit_vs || !s_blit_ps || !s_rs || !s_blit_sampler)
+    if (!s_vs || !s_ps || !s_blit_vs || !s_blit_ps || !s_rs || !s_rs_scissor || !s_blit_sampler)
         return 0;
     s_init_failed = 0;
     s_ready = 1;
@@ -318,35 +325,20 @@ static Target *target_find(uint32_t va)
     return NULL;
 }
 
-static Target *target_get(const Nv2aSurface *s)
-{
-    Target *t = target_find(s->color_va);
-    D3D11_TEXTURE2D_DESC td;
-    int i, victim = 0;
+static unsigned s_st_regrow;
 
-    if (t && t->w == s->width && t->h == s->height) {
-        t->last_used = s_frame;
-        return t;
-    }
-    if (!t) {
-        for (i = 0; i < MAX_TARGETS; i++) {
-            if (!s_targets[i].tex) { victim = i; break; }
-            if (s_targets[i].last_used < s_targets[victim].last_used) victim = i;
-        }
-        t = &s_targets[victim];
-    }
-    if (t == s_bound) { ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 0, NULL, NULL); s_bound = NULL; }
-    if (t == s_present) s_present = NULL;
-    target_free(t);
+static int target_alloc(Target *t, uint32_t w, uint32_t h)
+{
+    D3D11_TEXTURE2D_DESC td;
 
     memset(&td, 0, sizeof td);
-    td.Width = s->width; td.Height = s->height;
+    td.Width = w; td.Height = h;
     td.MipLevels = 1; td.ArraySize = 1;
     td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     td.SampleDesc.Count = 1;
     td.Usage = D3D11_USAGE_DEFAULT;
     td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    if (FAILED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &t->tex))) return NULL;
+    if (FAILED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &t->tex))) return 0;
     ID3D11Device_CreateRenderTargetView(s_dev, (ID3D11Resource *)t->tex, NULL, &t->rtv);
     ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)t->tex, NULL, &t->srv);
 
@@ -354,8 +346,57 @@ static Target *target_get(const Nv2aSurface *s)
     td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
     if (SUCCEEDED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &t->ds_tex)))
         ID3D11Device_CreateDepthStencilView(s_dev, (ID3D11Resource *)t->ds_tex, NULL, &t->dsv);
+    t->w = w; t->h = h;
+    return 1;
+}
 
-    t->color_va = s->color_va; t->w = s->width; t->h = s->height;
+/* One target per guest colour address. Its size only grows: the surface
+ * size the executor reports is the clip rectangle, which a title narrows to
+ * draw a panel or a sprite, and recreating the target there wiped everything
+ * drawn before it (black menus). Growing copies the old pixels across. */
+static Target *target_get(const Nv2aSurface *s)
+{
+    Target *t = target_find(s->color_va);
+    uint32_t want_w = s->clip_x + s->width, want_h = s->clip_y + s->height;
+    int i, victim = 0;
+
+    if (want_w > 4096) want_w = 4096;
+    if (want_h > 4096) want_h = 4096;
+    if (t && want_w <= t->w && want_h <= t->h) {
+        t->last_used = s_frame;
+        return t;
+    }
+    if (t) {                                       /* grow, keeping the contents */
+        Target old = *t;
+        uint32_t nw = want_w > t->w ? want_w : t->w;
+        uint32_t nh = want_h > t->h ? want_h : t->h;
+        D3D11_BOX box;
+
+        if (t == s_bound) { ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 0, NULL, NULL); s_bound = NULL; }
+        memset(t, 0, sizeof *t);
+        t->color_va = old.color_va;
+        t->gpu_frame = old.gpu_frame; t->cpu_frame = old.cpu_frame;
+        t->guest_hash = old.guest_hash; t->hash_frame = old.hash_frame; t->hash_init = old.hash_init;
+        if (!target_alloc(t, nw, nh)) { target_free(&old); memset(t, 0, sizeof *t); return NULL; }
+        box.left = 0; box.top = 0; box.front = 0;
+        box.right = old.w; box.bottom = old.h; box.back = 1;
+        ID3D11DeviceContext_CopySubresourceRegion(s_ctx, (ID3D11Resource *)t->tex, 0, 0, 0, 0,
+                                                  (ID3D11Resource *)old.tex, 0, &box);
+        target_free(&old);
+        t->last_used = s_frame;
+        s_st_regrow++;
+        return t;
+    }
+    for (i = 0; i < MAX_TARGETS; i++) {
+        if (!s_targets[i].tex) { victim = i; break; }
+        if (s_targets[i].last_used < s_targets[victim].last_used) victim = i;
+    }
+    t = &s_targets[victim];
+    if (t == s_bound) { ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 0, NULL, NULL); s_bound = NULL; }
+    if (t == s_present) s_present = NULL;
+    target_free(t);
+    if (!target_alloc(t, want_w, want_h)) { memset(t, 0, sizeof *t); return NULL; }
+    t->color_va = s->color_va;
     t->last_used = s_frame;
     return t;
 }
@@ -375,7 +416,7 @@ static void bind_target(Target *t)
  * (smaller ones are shadow maps, reflections and the like). */
 static void note_present_candidate(Target *t, const Nv2aSurface *s)
 {
-    if (s->width / s->aa_sx >= 512)
+    if (t->w / (s->aa_sx ? s->aa_sx : 1) >= 512)
         s_present = t;
 }
 
@@ -711,20 +752,32 @@ static void be_clear(const Nv2aSurface *s, const Nv2aRenderState *rs,
                      uint32_t flags, uint32_t argb, uint32_t zstencil)
 {
     Target *t;
+    int full;
     if (!init() || !s->color_va || !s->width || !s->height) return;
     t = target_get(s);
     if (!t) return;
     note_depth_range(rs);
     note_present_candidate(t, s);
+    full = (s->clear_x1 <= s->clear_x0 || s->clear_y1 <= s->clear_y0)   /* not given */
+        || (s->clear_x0 == 0 && s->clear_y0 == 0
+            && s->clear_x1 >= t->w && s->clear_y1 >= t->h);
     if (flags & 0xF0) {
         float c[4];
         c[0] = ((argb >> 16) & 0xFF) / 255.0f;
         c[1] = ((argb >> 8) & 0xFF) / 255.0f;
         c[2] = (argb & 0xFF) / 255.0f;
         c[3] = ((argb >> 24) & 0xFF) / 255.0f;
-        ID3D11DeviceContext_ClearRenderTargetView(s_ctx, t->rtv, c);
+        if (!full && s_ctx1) {
+            D3D11_RECT r;
+            r.left = (LONG)s->clear_x0; r.top = (LONG)s->clear_y0;
+            r.right = (LONG)s->clear_x1; r.bottom = (LONG)s->clear_y1;
+            ID3D11DeviceContext1_ClearView(s_ctx1, (ID3D11View *)t->rtv, c, &r, 1);
+        } else
+            ID3D11DeviceContext_ClearRenderTargetView(s_ctx, t->rtv, c);
     }
-    if ((flags & 0x3) && t->dsv) {
+    /* ponytail: D3D11 has no rect clear for depth; a partial depth clear is
+     * skipped rather than wiping depth the rest of the surface still uses. */
+    if ((flags & 0x3) && t->dsv && full) {
         UINT f = 0;
         float depth;
         if (flags & 0x1) f |= D3D11_CLEAR_DEPTH;
@@ -808,7 +861,13 @@ static void be_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     ID3D11DeviceContext_PSSetConstantBuffers(s_ctx, 0, 1, &s_cb);
     ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, 1, &srv);
     ID3D11DeviceContext_PSSetSamplers(s_ctx, 0, 1, &samp);
-    ID3D11DeviceContext_RSSetState(s_ctx, s_rs);
+    {
+        D3D11_RECT sc;
+        sc.left = (LONG)s->clip_x; sc.top = (LONG)s->clip_y;
+        sc.right = (LONG)(s->clip_x + s->width); sc.bottom = (LONG)(s->clip_y + s->height);
+        ID3D11DeviceContext_RSSetScissorRects(s_ctx, 1, &sc);
+        ID3D11DeviceContext_RSSetState(s_ctx, s_rs_scissor);
+    }
 
     bf[0] = ((rs->blend_color >> 16) & 0xFF) / 255.0f;
     bf[1] = ((rs->blend_color >> 8) & 0xFF) / 255.0f;
@@ -914,12 +973,12 @@ static void be_flip(void)
             if (stats && ++tick % 5 == 0) {
                 int i, nt = 0;
                 for (i = 0; i < MAX_TARGETS; i++) if (s_targets[i].tex) nt++;
-                fprintf(stderr, "[D3D11] %u draws, textured %u/%u (rtt %u, self %u, guest %u),"
+                fprintf(stderr, "[D3D11] %u draws, textured %u/%u (rtt %u, self %u, guest %u), %u regrows,"
                         " %d targets, present 0x%08X %ux%u\n",
-                        s_st_draws, s_st_texok, s_st_texreq, s_st_rtt, s_st_rtt_self, s_st_rtt_guest, nt,
+                        s_st_draws, s_st_texok, s_st_texreq, s_st_rtt, s_st_rtt_self, s_st_rtt_guest, s_st_regrow, nt,
                         s_present ? s_present->color_va : 0,
                         s_present ? s_present->w : 0, s_present ? s_present->h : 0);
-                s_st_draws = s_st_texreq = s_st_texok = s_st_rtt = s_st_rtt_self = s_st_rtt_guest = 0;
+                s_st_draws = s_st_texreq = s_st_texok = s_st_rtt = s_st_rtt_self = s_st_rtt_guest = s_st_regrow = 0;
             }
         }
         fps_t0 = GetTickCount();
