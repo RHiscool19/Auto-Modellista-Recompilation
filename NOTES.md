@@ -46,7 +46,90 @@ Analysis output lives outside the repo in `C:\AMRecomp\work\` (derived from game
 - [x] Dump extracted, XBE hashed and parsed
 - [x] disasm, func_id, abi_analysis
 - [x] Game project scaffolded from templates/new-game (entry 0x0017A750, AM_GAME_DIR CMake option)
-- [ ] recomp → src/recomp/gen
+- [x] recomp → src/recomp/gen: 17,020/17,020 functions, 0 failed, 1,811,390 lines in 18 files (35 s on Windows)
+  - 1 unresolved call target stubbed
+  - 220 unimplemented instructions (logged at runtime via RECOMP_UNIMPL):
+    - 209x `aaa` around 0x0021A188, inside the D3D section: almost certainly data decoded as code (0x37 = '7'); D3D gets replaced anyway
+    - cli/sti (3/4), sgdt + ljmp at 0x00181198..0x001811A9: privileged code, looks like a reboot/hardware path in .text
+    - `fninit` at 0x001F76B8 (CRT FPU init, runs at startup) and `fxtract` at 0x0019A3C4 (float math helper): real FPU ops worth implementing
 - [ ] xemu reference run (boot + race on 2 tracks)
-- [ ] First build
+- [x] First build: VS 2026 (MSVC 14.52), Release with generated code at /Od + /MP (AM_FAST_GEN_BUILD=ON); ~10 s compile, 0 errors
+  - Optimizing the generated code with /O2 stalled 25+ min on recomp_0012.c (7,000+ line functions), hence /Od during bring-up
+  - C4717 "recursive on all control paths": sub_001AEF50, sub_001F0E23. Will stack-overflow if reached; check if a crash lands there
+- [x] First runs (scripts/run.ps1)
+  - Exit code 3 = the watchdog's own _exit(3) after RECOMP_WATCHDOG_SECS, not a crash
+  - Without RECOMP_AC97_READY=1 the game prints "Cannot create DirectSound!" and stalls; with it, DirectSound and the APU come up
+  - Boot reaches: save dirs TDATA/UDATA 4343000e, Font.xpr, ~300 vertex shaders from media/Shaders, then opens all AFS archives + Open.aix/Open2.aix
+  - Then: worker threads created via PsCreateSystemThreadEx with start 0x001F0E2D; ICALL can't resolve 0x001F0E2D or 0x001F7E8B (not detected as functions), thread dies holding guest lock 0x003FBDB0, main thread deadlocks
+  - Fixed by config/seed_functions.json (scripts/regen.ps1): 17,013 functions, no more ICALL failures
+- [ ] Run 3: 4 worker threads start (ctx 0x001F0E2D) and read the AFS header ("AFS\0"), then stall
+  - Main thread spins in sub_00011746 (loads 3 AFS partitions): polls sub_001AC530 -> sub_001AC020 (partition status) waiting for 3 = done
+  - Workers spin on KeWaitForSingleObject / NtSuspendThread / NtResumeThread (~46M kernel calls in 120 s)
+  - RECOMP_VBLANK=paced: vblanks fire (~60 Hz) and partition loading in sub_00011746 now COMPLETES (TOC reads @2048/@4096)
+- [ ] Run 4: main thread moves on: main 0x78032 -> 0x77F58 -> 0x77B06 -> 0x77690 -> sub_00011960 (sync file load from AFS: open 0x1AC320, read 0x1AB8A0, poll 0x1ABC70) -> deep in CRI server (0x1ABF1E .. 0x1B737E)
+  - Read @122421248 (10 KB) completes on the host side, but the poll loop never sees it finish
+  - Workers still spin on KeWaitForSingleObject (~25M calls): fits "title builds its own KEVENTs" -> waits fail instantly. Next: RECOMP_TITLE_KEVENTS=1
+  - Still 0 pushbuffer calls, 0 flips: nothing drawn yet
+- [ ] Run 5 (+ RECOMP_TITLE_KEVENTS=1): spinning stops (63K kernel calls in 120 s instead of ~30M)
+  - 3 files now load via sub_00011960 (10 KB @122421248, 36 KB @123990016, 16 KB @125874176); the 4th creates its event but its read is never issued -> blocked, not spinning
+  - NtSuspendThread x10669 vs NtResumeThread x7286: CRI schedules its threads by suspend/resume, which assumes the Xbox's single CPU + strict priorities. On a multi-core host a resume can land before the matching self-suspend (lost wakeup). Next: RECOMP_GUEST_CPUS=0, then RECOMP_GUEST_LOCK=1
+- [x] Run 6 (+ RECOMP_GUEST_CPUS=0 + RECOMP_GUEST_LOCK=1): FIRST WINDOW. 536 file reads, all loading done
+  - Creates Z: cache files CACHE\LocalCache00.bin / LocalCache08.bin; 512-byte reads return END_OF_FILE (new empty files). Watch this
+  - GPU: 640x480 surface, 2 clears, 1 draw (4 indices, fullscreen texture 640x480 A8R8G8B8 at 0x80493000 = splash image?), 1 flip. Window black
+  - Draw coordinates degenerate (x 0..0, y 16..16): vertex positions wrong or not yet decoded
+  - Main thread then sits inside the D3D library: main -> 0x77FFD -> 0x77DD2 -> 0x104DE6 -> D3D 0x207852 .. 0x21DBD0, probably waiting on a GPU interrupt/fence. Next: RECOMP_PB_WALK=dma
+- [ ] Run 7 (GUEST_CPUS=0 + GUEST_LOCK=1 + PB_WALK=dma): regression, no window. Only worker #2 is created; main is stuck inside CRI's thread creation (sub_001F0EA1 -> 0x17FFA4) waiting for the new thread, which can't get the guest lock. GUEST_LOCK removed from run.ps1
 - [ ] Later: Ghidra FidDb naming pass (only 11 CRT functions identified)
+
+## D3D facts
+- Device pointer: guest 0x0021DBC8 (stock XDK layout: write sequence at +0x2C, pointer to GPU progress at +0x30)
+- sub_00209540 = D3D_BlockOnTime (fence wait). Patches NOP 0x40100 value 5 ("signal me" software method) and sleeps when the GPU is far behind
+- Present path from the game: 0x00104DE6 -> sub_002077A0 -> sub_00207760 -> sub_00206C80 -> sub_00209850 -> sub_00209540
+- Run 8 (window, 1 draw, 0 fps): main stuck in sub_00209540 with NV2A PUT=GET = exactly the "GPU read pointer problem" in the toolkit docs
+  - Bring-up fix: xbox_Nv2aMirrorFence(0x0021DBC8, 0x2C, 0x30) in main.c; PB_WALK off
+  - RESULT: boots! ESRB notice, logos and most of the intro movie, with audio, ~48-50 fps (stutters, some artifacts)
+  - The "crash" was the watchdog: RECOMP_WATCHDOG_SECS is a fixed timer (Sleep N s, then dump + _exit(3)), not hang detection. run.ps1 now leaves it off
+  - Honest fix for later: replace sub_00209540 (kick off first when fence == device+0x2C, then wait on the real semaphore via nv2a_pb_set_semaphore_target, bounded 250 ms)
+
+## Run 9: title screen, attract demo, crash
+- Reaches the title screen. No input (controller plugged in after launch; untested). Attract demo starts, drops to ~0.7 fps (in-engine 3D on the CPU rasteriser with /Od code), then C0000005
+- Crash: write to guest 0xC0B62C6E, guest esp 0x012013D8 (ABOVE the main stack top 0x011FFFF0)
+  - Chain: game sub_000CFCB0 -> sub_001067D0 (float wrapper) -> sub_001EEB84 (CRT sqrt) -> FP error path sub_001F2347 -> sub_001F789D -> sub_001F3423
+  - sqrt of a negative number takes the CRT error path, which the lifted code gets wrong
+  - Fix: src/am_overrides.c replaces sub_001EEB84 with native sqrt (NaN for negative input); regen.ps1 passes it to --exclude-manual
+
+## Run 10
+- sqrt override works (no generated sub_001EEB84; old crash gone)
+- New crash just before the attract demo: read from 0xBDB88D18 inside D3D's pushbuffer code (sub_00209120 "how far behind is the GPU" <- sub_002096B0 <- sub_00209800 <- sub_00203D90 <- sub_002041C0 <- game sub_00122770 / sub_001040B0)
+  - Suspect: the fence-mirror shortcut lets D3D reuse ring space/fences the executor hasn't consumed (toolkit docs warn about exactly this). Fix: honest replacement of sub_00209540 (stdcall, 2 args, ret 8)
+- No controller input with a Series X|S pad: the game's statically linked XPP library talks to USB host-controller hardware, so it never sees XInput unless RECOMP_USB=1 (OHCI model). Added to run.ps1 with RECOMP_INPUT_DIAG=1
+- Run 11: still no input. RECOMP_USB alone does nothing: xbox_OhciInit() (src/usb/ohci.c) is never called by the template's main.c. Added the call in main.c after memory init
+- Run 12 (USB trace): OHCI up, pad connects on port 3, port reset OK, but every ED the driver hands over (HCCA 0x00488000, control ED 0x004890C0) reads as all zeroes
+  - Cause: contiguous allocations get physical addresses inside the image's VA range (0x10000..0x97C838); ohci.c bus_resolve() treats such addresses as the image itself. Fix: RECOMP_CONTIG_AVOID_IMAGE=1 (run.ps1)
+
+## Run 13-14: controller works, race reached
+- RECOMP_CONTIG_AVOID_IMAGE=1 fixed USB: pad enumerates, input works, rumble reports flow
+- Save data created (U:\1983DD2F3706\SaveMeta.xbx, GameData)
+- Save/load dialogs: text and buttons fine, background image drawn as striped garbage (texture format/swizzle, or fence-mirror corruption)
+- Menus ~8-10 fps
+- Run 13 (intro played): hung on a grey loading screen after Arcade > Single race (60 fps, 1 draw, audio looped then stopped). Not reproduced yet
+- Run 14 (intro skipped, watchdog 120 s): Arcade > Single race > track/BGM/car/settings > race start, ~10 fps. Watchdog stack is inside D3D drawing with GPU PUT != GET: it was running normally, not hung
+- cli/sti at 0x002B9DB2/0x002B9DC3 (XPP section) reached, harmless no-ops
+
+## Run 15: race start
+- Go race -> loading screen -> Suzuka intro camera (~1-2 fps) -> crash C0000005
+- 384x "ICALL failed to resolve 0x0003DAF0" right before it: function missed by disasm (gap before sub_0003DB10). Seeded in config/seed_functions.json; full regen needed
+- Crash itself (read 0x846995F0, guest esp back at stack top 0x011FFFF0) is probably fallout from the failed calls; recheck after regen
+- Car select spins the car in 3D and looks right
+
+## Run 16-17: IN RACE
+- Run 16: crash before window in the XPP USB interrupt path (DPC thread, esp 0x00A3FF5C, list walk read 0x7FFFFFF8). Did not repeat: likely a race between the OHCI model's interrupt thread and the driver. Fix properly later
+- Run 17: Suzuka single race running, ~3 fps, 430 draws/frame. Track, sky, signage, HUD, minimap, tach all render
+- Visual bugs: car bodies nearly black (lighting / cel-shading path: vertex programs or register combiners), speed digits partially drawn
+- Race runs stably (unoptimized) at 2-3 fps in race, 6-15 fps in the intro flyover
+- Cars: distant cars often correct (white/red/silver); near cars black, sometimes flicker to the correct colour. Nondeterministic -> suspect the fence-mirror shortcut (D3D reusing vertex/constant memory the executor hasn't consumed) before suspecting shader translation
+- Alpha-tested scenery (ferris wheel, trees, fences) shows as dithered dots
+
+## Performance step 1
+- CMake: AM_OPTIMIZE_GEN=ON compiles generated code at /O2 except AM_GEN_NOOPT_FILES (default recomp_0012.c: four ~7,400-line functions 0x1E0E10..0x1E8300)
+- Other big functions to watch if a file stalls: sub_0021A16B (13,580 lines, recomp_0013.c; compiled fine at /O2 before), sub_000C3FB0 (5,006 lines, recomp_0003.c)

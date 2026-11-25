@@ -52,6 +52,7 @@ file(GLOB RECOMP_GEN_SOURCES CONFIGURE_DEPENDS "src/recomp/gen/*.c")
 set(GAME_SOURCES
     src/main.c
     src/recomp_manual.c
+    src/am_overrides.c
     # Add game-specific sources here, e.g.:
     # src/asset_loader.c
     # src/custom_renderer.c
@@ -123,3 +124,27 @@ set(AM_GAME_DIR "C:/AMRecomp/Source Files/Unpacked ISO" CACHE PATH
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     AM_GAME_DIR="${AM_GAME_DIR}"
 )
+
+# ── Build speed for the generated code ─────────────────────────
+# /MP: compile the generated files in parallel instead of one at a time.
+#
+# AM_OPTIMIZE_GEN (default ON): compile generated code with the normal
+# Release optimizations, except the files listed in AM_GEN_NOOPT_FILES.
+# Those hold the 7,000+ line functions (sub_001E0E10, sub_001E4870, ...)
+# that MSVC's optimizer stalled on for 25+ minutes, so they stay at /Od.
+# If a build sits on one generated file for more than ~5 minutes, add it
+# to the list:  cmake -S . -B build -DAM_GEN_NOOPT_FILES="recomp_0012.c;recomp_0009.c"
+# Set AM_OPTIMIZE_GEN=OFF for a fast, easily debugged /Od build of everything.
+option(AM_OPTIMIZE_GEN "Optimize generated recomp code (except AM_GEN_NOOPT_FILES)" ON)
+set(AM_GEN_NOOPT_FILES "recomp_0012.c" CACHE STRING
+    "Generated files compiled without optimization (semicolon-separated)")
+if(MSVC)
+    target_compile_options(${PROJECT_NAME} PRIVATE /MP)
+    foreach(gen_src ${RECOMP_GEN_SOURCES})
+        get_filename_component(gen_name ${gen_src} NAME)
+        if(NOT AM_OPTIMIZE_GEN OR gen_name IN_LIST AM_GEN_NOOPT_FILES)
+            set_source_files_properties(${gen_src} PROPERTIES
+                COMPILE_OPTIONS "/Od;/Ob0")
+        endif()
+    endforeach()
+endif()

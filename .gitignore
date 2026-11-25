@@ -30,3 +30,6 @@ out/
 
 # Stray toolkit clone at the repo root (the submodule lives in external/)
 /xboxrecomp/
+
+# Runtime logs (written to the working directory by the runtime)
+*.log

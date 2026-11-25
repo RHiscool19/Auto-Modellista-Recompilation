@@ -1,0 +1,14 @@
+[
+  {
+    "start": "0x001F0E2D",
+    "note": "thread start routine passed to PsCreateSystemThreadEx (ctx1); lives inside sub_001F0E23"
+  },
+  {
+    "start": "0x001F7E8B",
+    "note": "indirect-call target reached from the thread above"
+  },
+  {
+    "start": "0x0003DAF0",
+    "note": "indirect-call target hit 384x at race start (Suzuka intro camera); sat in an undetected gap before sub_0003DB10"
+  }
+]

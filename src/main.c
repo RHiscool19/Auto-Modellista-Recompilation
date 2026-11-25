@@ -339,6 +339,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     }
 
     g_xbox_mem_offset = xbox_GetMemoryOffset();
+
+    /* Auto Modellista's XDK D3D keeps its device pointer at guest 0x0021DBC8.
+     * Its fence wait (sub_00209540, D3D_BlockOnTime) compares the write
+     * sequence at device+0x2C with the GPU progress word that device+0x30
+     * points to, and only the GPU moves that word. Mirror one into the other
+     * so the wait sees the GPU as caught up (see
+     * docs/technical/d3d8ltcg-device-context.md). Bring-up shortcut: the
+     * honest fix replaces sub_00209540 and uses nv2a_pb_set_semaphore_target. */
+    xbox_Nv2aMirrorFence(0x0021DBC8u, 0x2C, 0x30);
     printf("Xbox memory mapped. Offset: 0x%llX\n", (unsigned long long)g_xbox_mem_offset);
 
     /* Bring up the emulated APU.
@@ -352,6 +361,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         g_apu_state = mcpx_apu_init_standalone((uint8_t *)xbox_GetMemoryBase());
         fprintf(stderr, "[BOOT] emulated APU %s\n",
                 g_apu_state ? "up" : "FAILED to initialise");
+    }
+
+    /* USB host-controller model (RECOMP_USB=1). The game's XDK input library
+     * (XPP) drives the OHCI controller directly, so without this it never sees
+     * a pad. The model answers through trapped MMIO (xbox_VehMmioFault in the
+     * VEH below) and feeds host XInput pads in as Xbox controllers. The
+     * template never called this, so RECOMP_USB alone did nothing. */
+    {
+        extern void xbox_OhciInit(void);
+        xbox_OhciInit();
     }
 
     /* Step 3: Initialize Xbox kernel */
