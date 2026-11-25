@@ -34,8 +34,19 @@
 - Precompiled NV2A shaders on disc: `media/Shaders/*.xvu` (vertex microcode), `*.xpu` (pixel). The cel shading is probably in here.
 - Xbox Live linked in: XONLINE/XNET need to report "no network" cleanly.
 
+## Pipeline results (xboxrecomp, Nov 2026)
+Analysis output lives outside the repo in `C:\AMRecomp\work\` (derived from game code).
+- disasm (all code sections): 17,011 functions, 965,659 instructions, 172,310 xrefs, 10,511 strings
+  - .text 12,936 · D3D 754 · D3DX 618 · DSOUND 792 · XNET 486 · XONLINE 1,061 · XPP 275 · XGRPH 35 · Sofdec (PSGSFD*) 54 · DOLBY 0 (DSP code, correctly skipped)
+- func_id: 23,351 entries after adding 6,340 vtable thunks; only 11 CRT functions matched by signature, 11,660 unknown
+- abi_analysis: 17,011 entries, 772 thiscall
+- recomp detected: __SEH_prolog 0x001F030C / 0x001FC730, __SEH_epilog 0x001F0347, setjmp 0x001F07B0, longjmp 0x001F0734
+
 ## Status
 - [x] Dump extracted, XBE hashed and parsed
+- [x] disasm, func_id, abi_analysis
+- [x] Game project scaffolded from templates/new-game (entry 0x0017A750, AM_GAME_DIR CMake option)
+- [ ] recomp → src/recomp/gen
 - [ ] xemu reference run (boot + race on 2 tracks)
-- [ ] xboxrecomp pipeline: disasm → func_id → abi_analysis → recomp
 - [ ] First build
+- [ ] Later: Ghidra FidDb naming pass (only 11 CRT functions identified)
