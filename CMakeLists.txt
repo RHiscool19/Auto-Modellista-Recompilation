@@ -148,3 +148,13 @@ if(MSVC)
         endif()
     endforeach()
 endif()
+
+# ── Profiling symbols ───────────────────────────────────────────
+# Release builds also get a .pdb, so a profiler (Visual Studio's Performance
+# Profiler) and crash traces can name the generated function (sub_XXXXXXXX)
+# that time is spent in. Doesn't change the generated code's speed.
+if(MSVC)
+    target_compile_options(${PROJECT_NAME} PRIVATE "$<$<CONFIG:Release>:/Zi;/FS>")
+    target_link_options(${PROJECT_NAME} PRIVATE
+        "$<$<CONFIG:Release>:/DEBUG:FULL;/OPT:REF;/OPT:NOICF>")
+endif()

@@ -133,3 +133,22 @@ Analysis output lives outside the repo in `C:\AMRecomp\work\` (derived from game
 ## Performance step 1
 - CMake: AM_OPTIMIZE_GEN=ON compiles generated code at /O2 except AM_GEN_NOOPT_FILES (default recomp_0012.c: four ~7,400-line functions 0x1E0E10..0x1E8300)
 - Other big functions to watch if a file stalls: sub_0021A16B (13,580 lines, recomp_0013.c; compiled fine at /O2 before), sub_000C3FB0 (5,006 lines, recomp_0003.c)
+
+## Performance measurements
+- Optimized gen build (all but recomp_0012.c at /O2): menus 10 -> 10-15 fps, race unchanged ~2 fps
+- RECOMP_NO_VSH=1 (vertex programs off, 3D mostly missing): menus 40-60 fps, race intro 19-20 fps, in race still ~4 fps with 480 draws
+  - => in menus the vertex-program interpreter is the main cost; in the race something else dominates
+- Suspect for the race: recomp_0012.c is still /Od and holds sub_001E0E10/001E0EE2/001E4870/001E8300: 13 KB straight-line fixed-point code (fild/sar/shl/add, no calls), reached only indirectly. Looks like hand-unrolled DSP, probably CRI audio decoding (audio stutters). Unconfirmed: profile next (Release now emits a PDB)
+- Profile 1 (VS CPU Usage, 2 min, race): nv2a_pb_exec_walk_begin 44.6% total / 26.5% self (GPU executor thread), kernelbase 12.4%, ucrtbase 9.0%, sub_00209360 8.1%, ntdll 7.7%; "xbox_translate_path" 33.6% total as a thread root (almost certainly a mislabel from /OPT:ICF folding identical functions; ICF now off)
+  - sub_00209360 = D3D KickOff: sets NV2A 0x100410 bit 16 and spins until the executor clears it (xbox_Nv2aAckBusyBits, every 256 words). The game thread busy-waits on the executor at every kickoff
+  - => the single GPU-executor thread (vertex programs + triangle setup on the CPU) is the bottleneck, and the game thread waits for it
+- Profile 2 (/OPT:NOICF, race): nv2a_pb_exec_walk_begin 23.8% self (40.4% total), nv2a_rc_eval 6.3% + nv2a_rc_unpack 6.1% self (register combiners per pixel), kernelbase 12.3%, ucrtbase 8.9%, gdi32 8.2% (framebuffer window blit/scale), sub_00209360 7.7% (KickOff spin), ntdll 6.6%
+  - Still-implausible labels: apu_wav_write 3% self and xbox_missing_verbose 2.4% self are both trivial early-return functions in this config, so a block of time is still attributed to the wrong symbols. Treat small runtime-function names in these profiles as unreliable
+  - Conclusion: per-pixel work in the CPU rasteriser (incl. combiners) is the largest single cost, then the GPU-thread handshake, then presenting via GDI
+
+## Plan: Direct3D 11 render back end
+- Register through nv2a_backend_register() (src/kernel/nv2a_backend.h): clear / draw / flip, triangles arrive in surface pixels with 1/w, colour, UVs, texture info, blend/depth/stencil state
+- Gaps to close in the toolkit interface: register-combiner state and texture stages 1-3 are not passed to back ends (needed for the cel shading); reuse xbox_d3d8's combiner -> HLSL translator
+- Follow the doc's advice: compare window z as-is, implement stencil, cull from projected positions
+- Later: vertex programs on the GPU (xbox_d3d8 has an NV2A microcode -> HLSL translator too)
+- Quick win to test first: present via the back end instead of GDI (gdi32 8%)
