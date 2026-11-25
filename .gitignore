@@ -1,0 +1,32 @@
+# Game files: never commit copyrighted data
+game_files/
+*.iso
+*.xiso
+*.xbe
+*.afs
+*.aix
+*.xvu
+*.xpu
+*.xpr
+*.xbx
+
+# Pipeline output derived from the game's code
+src/recomp/gen/
+tools_output/
+*_analysis.json
+functions.json
+xrefs.json
+strings.json
+abi_functions.json
+
+# Build
+build/
+out/
+.vs/
+*.exe
+*.pdb
+*.obj
+*.ilk
+
+# Stray toolkit clone at the repo root (the submodule lives in external/)
+/xboxrecomp/
