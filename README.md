@@ -14,7 +14,7 @@ There are two renderers. The **D3D11 renderer** (`run.ps1 -D3D11`) draws on the 
 
 | Area | D3D11 renderer | CPU renderer |
 |---|---|---|
-| Boot, ESRB / logos / intro movie | ✅ (ESRB fade covers only part of the screen) | ✅ |
+| Boot, ESRB / logos / intro movie | ✅ (ESRB panel and border fade separately) | ✅ |
 | Title screen, menus, save create / load | ✅ ~60 fps | ✅ 10–15 fps |
 | Arcade → single race → car select (3D car preview) | ✅ | ✅ |
 | Textures, transparency, sky | ✅ | ⚠️ alpha-tested scenery dithered, striped dialog background |
@@ -155,7 +155,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run.ps1 -D3D11
 
 - **Race performance.** Races run at about 3 fps on either renderer. The D3D11 renderer draws the same track at 30–60 fps during the pre-race camera pan, so drawing is not the limit; the cost is on the CPU side while racing and is being investigated (see `NOTES.md`).
 - **CPU renderer.** Menus at 10–15 fps, car bodies render black. Use `-D3D11`.
-- **Small D3D11 glitches.** The ESRB logo fade covers only part of the screen; some letters are missing from menu description text.
+- **Small D3D11 glitches.** The ESRB logo's centre panel and border fade at different times; some letters are missing from menu description text (fix in progress).
 - **Occasional crash at startup** in the USB interrupt path, likely a timing race. Relaunching works.
 - **Xbox Live** features are not supported.
 

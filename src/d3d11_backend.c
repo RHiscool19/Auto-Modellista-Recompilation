@@ -748,6 +748,8 @@ static ID3D11SamplerState *sampler(const Nv2aTexture *t)
 
 /* ---- Back-end callbacks -------------------------------------------------- */
 
+static void be_draw(const Nv2aSurface *s, const Nv2aBatch *b);
+
 static void be_clear(const Nv2aSurface *s, const Nv2aRenderState *rs,
                      uint32_t flags, uint32_t argb, uint32_t zstencil)
 {
@@ -775,8 +777,42 @@ static void be_clear(const Nv2aSurface *s, const Nv2aRenderState *rs,
         } else
             ID3D11DeviceContext_ClearRenderTargetView(s_ctx, t->rtv, c);
     }
-    /* ponytail: D3D11 has no rect clear for depth; a partial depth clear is
-     * skipped rather than wiping depth the rest of the surface still uses. */
+    /* D3D11 has no rect clear for depth/stencil: a partial one is drawn as a
+     * quad over the clear rectangle that writes only depth (and stencil),
+     * test ALWAYS, colour writes off. Skipping it left stale depth in the
+     * menu text box and glyphs failed the depth test (missing letters). */
+    if ((flags & 0x3) && t->dsv && !full) {
+        Nv2aSurface qs = *s;
+        Nv2aRenderState q;
+        Nv2aVertex v[6];
+        Nv2aBatch qb;
+        float depth = s_zscale > 70000.0f ? (float)(zstencil >> 8) / 16777215.0f
+                                          : (float)(zstencil & 0xFFFF) / 65535.0f;
+        float x0 = (float)s->clear_x0, y0 = (float)s->clear_y0;
+        float x1 = (float)s->clear_x1, y1 = (float)s->clear_y1;
+        int k;
+
+        memset(&q, 0, sizeof q);
+        q.depth_test_enable = 1; q.depth_func = 0x207;      /* GL_ALWAYS */
+        q.depth_write = (flags & 0x1) ? 1 : 0;
+        q.color_mask = 0;                                    /* no colour */
+        q.zeta_va = rs->zeta_va ? rs->zeta_va : 1;
+        q.depth_min = rs->depth_min; q.depth_max = rs->depth_max;
+        q.blend_src = 1; q.blend_dst = 0; q.blend_eq = 0x8006;
+        if (flags & 0x2) {
+            q.stencil_enable = 1; q.stencil_func = 0x207; q.stencil_ref = zstencil & 0xFF;
+            q.stencil_func_mask = 0xFF; q.stencil_write_mask = 0xFF;
+            q.stencil_fail = q.stencil_zfail = q.stencil_zpass = 0x1E01;   /* REPLACE */
+        }
+        qs.clip_x = s->clear_x0; qs.clip_y = s->clear_y0;
+        qs.width = s->clear_x1 - s->clear_x0; qs.height = s->clear_y1 - s->clear_y0;
+        memset(v, 0, sizeof v);
+        v[0].x = x0; v[0].y = y0; v[1].x = x1; v[1].y = y0; v[2].x = x0; v[2].y = y1;
+        v[3].x = x1; v[3].y = y0; v[4].x = x1; v[4].y = y1; v[5].x = x0; v[5].y = y1;
+        for (k = 0; k < 6; k++) { v[k].z = depth * s_zscale; v[k].rhw = 1.0f; }
+        qb.vertices = v; qb.count = 6; qb.texture = NULL; qb.state = &q;
+        be_draw(&qs, &qb);
+    }
     if ((flags & 0x3) && t->dsv && full) {
         UINT f = 0;
         float depth;

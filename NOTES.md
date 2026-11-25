@@ -154,10 +154,25 @@ Analysis output lives outside the repo in `C:\AMRecomp\work\` (derived from game
 - Quick win to test first: present via the back end instead of GDI (gdi32 8%)
 
 ## Goals
-1. **Menu speed (10-15 fps).** With RECOMP_NO_VSH=1 menus hit 40-60 fps, so the single-threaded software vertex-program interpreter is the menu bottleneck. Fix as part of the D3D11 back end: translate NV2A vertex programs to HLSL (reuse xbox_d3d8's microcode translator) and run them on the GPU. Interim option if needed: spread the interpreter across cores (toolkit change, uncertain gain)
-2. **Striped save/load dialog background.** Text and buttons draw correctly; only the background image is garbage. Likely a texture read with the wrong layout (swizzled vs linear) or format. Next: run to that dialog, close while it's on screen, read the [TEXUSE] lines for the textures in those frames and check their format/layout handling
-3. **Race performance (2-4 fps):** D3D11 render back end (see Plan above)
-4. **Black / flickering cars:** replace the fence-mirror shortcut with an honest sub_00209540 (D3D_BlockOnTime) using nv2a_pb_set_semaphore_target
+Done (D3D11 renderer, 2026-11-25):
+- ~~Menu speed~~: 60 fps on -D3D11 (vertex cache + GPU drawing)
+- ~~Striped save/load dialog background~~: correct on -D3D11
+- ~~Black / flickering cars~~: correct colours on -D3D11 (CPU renderer still shows it)
+
+Open, in order:
+1. **Race performance (~3 fps; pre-race pan of the same track is 30-60 fps).** Profile (VS CPU Usage, D3D11, racing):
+   ~1 core busy, ~80% of samples in kernel (ntdll/kernelbase), little in game code; some symbols mislabeled.
+   Suspects being tested:
+   - ICALL to unrecompiled 0x001F2395 failing millions of times in races (each prints ~22 log lines) -> seeded, needs full regen + test
+   - APU registers trapped via PAGE_NOACCESS: every access is an exception. `[MMIO-FAULTS]` counter added (5 s rate).
+     If high in races: route APU register access without faults (poll/diff like the NV2A registers, or a cheaper hook)
+   - Then re-profile; next candidates are GPU vertex programs and the KickOff spin (sub_00209360, 6% self)
+2. **Missing letters in menu description text.** Fix written, untested: partial depth/stencil clears are now drawn as a
+   depth-only quad over CLEAR_RECT (they were skipped, leaving stale depth in the text box)
+3. **ESRB fade**: centre panel and grey border fade at different times on D3D11. Compare with the CPU renderer; may be authentic
+4. **Release v0.2.0-alpha** once 1-2 are tested (notes drafted in chat; README already describes the D3D11 state)
+5. Later: register combiners / texture stages 1-3 in the back end (cel-shading look), GPU vertex programs, honest
+   sub_00209540 fence wait, USB ISR startup race, Switch port branch
 
 ## D3D11 back end v1 (src/d3d11_backend.c)
 - Opt-in: `.\scripts\run.ps1 -D3D11` (sets AM_D3D11=1, turns off RECOMP_FB_WINDOW; main.c registers it before the game starts)
