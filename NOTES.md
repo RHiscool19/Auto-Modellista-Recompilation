@@ -179,3 +179,12 @@ Analysis output lives outside the repo in `C:\AMRecomp\work\` (derived from game
 - Step 2 (only if still slow): GPU vertex programs in the D3D11 back end, reusing
   d3d8_vsh_generate_hlsl. Needs the back-end interface to take raw attributes +
   constants instead of screen-space vertices, and clipping moved to the GPU.
+
+## D3D11 v1 results (2026-11-25)
+- Textures work after passing the P8 palette through Nv2aTexture (decode had forced palette=0).
+- Black alternating triangles = strip winding: the executor emits (i,i+1,i+2) for every i;
+  RECOMP_STRIP_ALT_WINDING=1 (now set by run.ps1 -D3D11) emits hardware winding.
+- Menus/intro black: ~3 draws/frame, one samples a surface that is also a render target.
+  Hypothesis: the CPU fills it. Back end now samples guest memory when its hash changed
+  more recently than the last GPU draw into that target (stats line reports `guest N`).
+- Race still ~4 fps: CPU side (pushbuffer decode, VSH interpreter, clipping) dominates.

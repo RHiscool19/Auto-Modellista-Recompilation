@@ -268,6 +268,12 @@ typedef struct {
     ID3D11Texture2D          *ds_tex;
     ID3D11DepthStencilView   *dsv;
     uint32_t last_used;
+    /* Who wrote it last: the GPU (a draw into it) or the game's CPU (its
+     * guest memory changed). A surface the CPU fills -- menu art, movie
+     * frames -- and the game then samples must come from guest memory; our
+     * GPU copy of it was only ever cleared. */
+    uint32_t gpu_frame, cpu_frame, guest_hash, hash_frame;
+    int      hash_init;
 } Target;
 
 #define MAX_TARGETS 32
@@ -275,8 +281,23 @@ static Target   s_targets[MAX_TARGETS];
 static Target  *s_bound;           /* currently bound as render target */
 static Target  *s_present;         /* the surface to show at flip */
 /* Per-interval counters, printed every ~5 s (RECOMP_D3D11_STATS=0 silences). */
-static unsigned s_st_draws, s_st_texreq, s_st_texok, s_st_rtt, s_st_rtt_self, s_st_targets_new;
+static unsigned s_st_draws, s_st_texreq, s_st_texok, s_st_rtt, s_st_rtt_self, s_st_rtt_guest;
 static uint32_t s_frame = 1;
+
+static uint32_t tex_hash(const Nv2aTexture *t);
+
+/* 1: sample this target from guest memory instead of the GPU copy. */
+static int target_cpu_newer(Target *rt, const Nv2aTexture *tx)
+{
+    if (rt->hash_frame != s_frame) {
+        uint32_t h = tex_hash(tx);
+        rt->hash_frame = s_frame;
+        if (!rt->hash_init) { rt->hash_init = 1; rt->guest_hash = h; }
+        else if (h != rt->guest_hash) { rt->guest_hash = h; rt->cpu_frame = s_frame; }
+    }
+    if (!rt->gpu_frame) return 1;               /* never drawn into: CPU-fed */
+    return rt->cpu_frame > rt->gpu_frame;
+}
 
 static void target_free(Target *t)
 {
@@ -746,6 +767,7 @@ static void be_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     if (!init() || !b->count || !s->color_va || !s->width || !s->height) return;
     t = target_get(s);
     if (!t) return;
+    t->gpu_frame = s_frame;
     note_depth_range(rs);
     note_present_candidate(t, s);
 
@@ -761,7 +783,10 @@ static void be_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     if (b->texture) {
         Target *rt = target_find(b->texture->offset);     /* render-to-texture */
         s_st_texreq++;
-        if (rt && rt != t) { srv = rt->srv; s_st_rtt++; }
+        if (rt && target_cpu_newer(rt, b->texture)) {
+            srv = tex_get(b->texture); s_st_rtt_guest++;
+        }
+        else if (rt && rt != t) { srv = rt->srv; s_st_rtt++; }
         else if (rt) s_st_rtt_self++;
         else srv = tex_get(b->texture);
         if (srv) s_st_texok++;
@@ -889,12 +914,12 @@ static void be_flip(void)
             if (stats && ++tick % 5 == 0) {
                 int i, nt = 0;
                 for (i = 0; i < MAX_TARGETS; i++) if (s_targets[i].tex) nt++;
-                fprintf(stderr, "[D3D11] %u draws, textured %u/%u (rtt %u, self %u),"
+                fprintf(stderr, "[D3D11] %u draws, textured %u/%u (rtt %u, self %u, guest %u),"
                         " %d targets, present 0x%08X %ux%u\n",
-                        s_st_draws, s_st_texok, s_st_texreq, s_st_rtt, s_st_rtt_self, nt,
+                        s_st_draws, s_st_texok, s_st_texreq, s_st_rtt, s_st_rtt_self, s_st_rtt_guest, nt,
                         s_present ? s_present->color_va : 0,
                         s_present ? s_present->w : 0, s_present ? s_present->h : 0);
-                s_st_draws = s_st_texreq = s_st_texok = s_st_rtt = s_st_rtt_self = 0;
+                s_st_draws = s_st_texreq = s_st_texok = s_st_rtt = s_st_rtt_self = s_st_rtt_guest = 0;
             }
         }
         fps_t0 = GetTickCount();

@@ -19,9 +19,11 @@ $env:RECOMP_AC97_READY    = "1"   # otherwise DirectSoundCreate fails and engine
 if ($D3D11) {
     # GPU rendering (src/d3d11_backend.c) with its own window
     $env:AM_D3D11 = "1"
+    $env:RECOMP_STRIP_ALT_WINDING = "1"   # strips wind like hardware, so back-face culling keeps every triangle
     Remove-Item Env:RECOMP_FB_WINDOW -ErrorAction SilentlyContinue
 } else {
     Remove-Item Env:AM_D3D11 -ErrorAction SilentlyContinue
+    Remove-Item Env:RECOMP_STRIP_ALT_WINDING -ErrorAction SilentlyContinue
     $env:RECOMP_FB_WINDOW = "1"   # CPU-rendered guest framebuffer window
 }
 $env:RECOMP_VBLANK        = "paced" # 60 Hz vblank: CRI ADX/ADXF file streaming is driven by it
