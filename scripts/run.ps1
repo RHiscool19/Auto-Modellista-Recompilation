@@ -1,10 +1,12 @@
 # Runs the recompiled game with logging. Usage:  .\scripts\run.ps1
+# GPU rendering:  .\scripts\run.ps1 -D3D11
 # Optional:  .\scripts\run.ps1 -Watchdog 120   (kill after N seconds and dump the
 # guest stack; it is a plain timer, not hang detection, so it is off by default)
 # Output: C:\AMRecomp\work\run_out.log / run_err.log, then prints the exit code.
 
 param(
     [int]$Watchdog = 0,
+    [switch]$D3D11,
     [string]$Work  = "C:\AMRecomp\work"
 )
 
@@ -14,7 +16,14 @@ $exe  = Join-Path $Repo "build\Release\automodellista_recomp.exe"
 if ($Watchdog -gt 0) { $env:RECOMP_WATCHDOG_SECS = "$Watchdog" }
 else { Remove-Item Env:RECOMP_WATCHDOG_SECS -ErrorAction SilentlyContinue }
 $env:RECOMP_AC97_READY    = "1"   # otherwise DirectSoundCreate fails and engine init is skipped
-$env:RECOMP_FB_WINDOW     = "1"   # window showing the guest framebuffer
+if ($D3D11) {
+    # GPU rendering (src/d3d11_backend.c) with its own window
+    $env:AM_D3D11 = "1"
+    Remove-Item Env:RECOMP_FB_WINDOW -ErrorAction SilentlyContinue
+} else {
+    Remove-Item Env:AM_D3D11 -ErrorAction SilentlyContinue
+    $env:RECOMP_FB_WINDOW = "1"   # CPU-rendered guest framebuffer window
+}
 $env:RECOMP_VBLANK        = "paced" # 60 Hz vblank: CRI ADX/ADXF file streaming is driven by it
 $env:RECOMP_PB_EXEC       = "1"   # execute the GPU pushbuffer so frames can actually draw
 $env:RECOMP_WAIT_LOG      = "1"   # log waits that time out or block >= 500 ms

@@ -53,6 +53,7 @@ set(GAME_SOURCES
     src/main.c
     src/recomp_manual.c
     src/am_overrides.c
+    src/d3d11_backend.c
     # Add game-specific sources here, e.g.:
     # src/asset_loader.c
     # src/custom_renderer.c
@@ -83,6 +84,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 target_link_libraries(${PROJECT_NAME} PRIVATE
     d3d11
     dxgi
+    d3dcompiler
     dxguid
     $<IF:$<BOOL:${MINGW}>,xinput1_4,xinput>   # see src/input/CMakeLists.txt
     winmm

@@ -152,3 +152,30 @@ Analysis output lives outside the repo in `C:\AMRecomp\work\` (derived from game
 - Follow the doc's advice: compare window z as-is, implement stencil, cull from projected positions
 - Later: vertex programs on the GPU (xbox_d3d8 has an NV2A microcode -> HLSL translator too)
 - Quick win to test first: present via the back end instead of GDI (gdi32 8%)
+
+## Goals
+1. **Menu speed (10-15 fps).** With RECOMP_NO_VSH=1 menus hit 40-60 fps, so the single-threaded software vertex-program interpreter is the menu bottleneck. Fix as part of the D3D11 back end: translate NV2A vertex programs to HLSL (reuse xbox_d3d8's microcode translator) and run them on the GPU. Interim option if needed: spread the interpreter across cores (toolkit change, uncertain gain)
+2. **Striped save/load dialog background.** Text and buttons draw correctly; only the background image is garbage. Likely a texture read with the wrong layout (swizzled vs linear) or format. Next: run to that dialog, close while it's on screen, read the [TEXUSE] lines for the textures in those frames and check their format/layout handling
+3. **Race performance (2-4 fps):** D3D11 render back end (see Plan above)
+4. **Black / flickering cars:** replace the fence-mirror shortcut with an honest sub_00209540 (D3D_BlockOnTime) using nv2a_pb_set_semaphore_target
+
+## D3D11 back end v1 (src/d3d11_backend.c)
+- Opt-in: `.\scripts\run.ps1 -D3D11` (sets AM_D3D11=1, turns off RECOMP_FB_WINDOW; main.c registers it before the game starts)
+- One B8G8R8A8 render target + D24S8 per guest colour surface; presents the last >=512-wide surface, letterboxed 4:3
+- Triangles arrive in surface pixels with 1/w; VS rebuilds clip space (x,y,z)*w so UVs/colour interpolate perspective-correctly; window z / fixed scale (65535 or 16777215, sticky, never per draw)
+- Culling per triangle on the CPU from projected positions; rasteriser cull off
+- Blend / alpha test (in PS) / depth / stencil / colour mask mapped from NV2A GL enums
+- Textures: nv2a_backend_decode_texture, cached by (offset,size,format,pitch), re-hashed sparsely once per frame; render-to-texture uses the GPU copy
+- Missing in v1: register combiners and texture stages 1-3 (no cel shading), mip levels, vertex programs still on the CPU, nothing written back to guest memory
+
+## Post-transform vertex cache (menu speed, step 1)
+- nv2a_vsh_interp already decodes each program once per upload (vsh_run_decoded);
+  the waste was running it once per *index*. raster_batch_program now keeps a
+  4096-entry direct-mapped cache keyed by vertex index, valid for one batch,
+  skipped when the program writes c[] (CXT_WRITE). RECOMP_XF_CACHE=0 disables.
+- Prints `[XF-CACHE] N% of vertices reused` every 16M vertices.
+- Lives in the xboxrecomp submodule (local changes, like the other runtime
+  edits) -- these need to become a fork or a patch set before others can build.
+- Step 2 (only if still slow): GPU vertex programs in the D3D11 back end, reusing
+  d3d8_vsh_generate_hlsl. Needs the back-end interface to take raw attributes +
+  constants instead of screen-space vertices, and clipping moved to the GPU.

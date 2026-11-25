@@ -373,6 +373,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         xbox_OhciInit();
     }
 
+    /* Direct3D 11 render back end (src/d3d11_backend.c), opt-in with
+     * AM_D3D11=1. Must be registered before the game submits GPU work. */
+    if (getenv("AM_D3D11") && getenv("AM_D3D11")[0] == '1') {
+        extern void am_d3d11_register(void);
+        am_d3d11_register();
+    }
+
     /* Step 3: Initialize Xbox kernel */
     printf("Initializing Xbox kernel replacement...\n");
     xbox_kernel_init();
