@@ -69,6 +69,12 @@ cd Auto-Modellista-Recompilation
 
 If you already cloned without `--recurse-submodules`: `git submodule update --init`.
 
+Then apply this project's changes to the toolkit (once per clone):
+
+```
+powershell -ExecutionPolicy Bypass -File .\scripts\apply-patches.ps1
+```
+
 ### 2. Generate the recompiled code
 
 ```

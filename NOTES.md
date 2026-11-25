@@ -195,3 +195,9 @@ Analysis output lives outside the repo in `C:\AMRecomp\work\` (derived from game
 - Remaining visual nits: ESRB fade shows in a region not full screen (partial depth clears are
   skipped; or blend/clip); some menu text glyphs missing (m, p, y, w, k in descriptions).
 - Race: still ~3 fps vs 30-60 in the pre-race pan of the same scene -> CPU/game-side, profile next.
+
+## Runtime changes live in patches/
+external/xboxrecomp is sp00nznet's repo and can't be pushed to. Our edits to it are kept as
+patches/xboxrecomp-automodellista.patch (regenerate with
+`git -C external/xboxrecomp diff > patches/xboxrecomp-automodellista.patch`) and applied by
+scripts/apply-patches.ps1. Never commit inside the submodule.

@@ -1,0 +1,176 @@
+diff --git a/src/kernel/nv2a_backend.h b/src/kernel/nv2a_backend.h
+index 87788ed..1e18b5b 100644
+--- a/src/kernel/nv2a_backend.h
++++ b/src/kernel/nv2a_backend.h
+@@ -38,6 +38,12 @@ typedef struct {
+     uint32_t pitch;             /* bytes per row */
+     uint32_t bytes_per_pixel;   /* 2 or 4 */
+     uint32_t aa_sx, aa_sy;      /* 1 or 2 each */
++    /* Clip origin: the clip rectangle is (clip_x, clip_y, width, height) in
++     * surface pixels; vertices are in surface pixels, not clip-relative. */
++    uint32_t clip_x, clip_y;
++    /* clear() only: the rectangle to clear, [x0,x1) x [y0,y1) (CLEAR_RECT when
++     * the title set it, else the clip rectangle). Zero in draw(). */
++    uint32_t clear_x0, clear_y0, clear_x1, clear_y1;
+ } Nv2aSurface;
+ 
+ /* A texture as the title programmed it. uv in Nv2aVertex are in texels. */
+@@ -51,6 +57,7 @@ typedef struct {
+      * a linear texture) and the raw SET_TEXTURE_FILTER word (MIN in bits
+      * 16-23). A back end that ignores them samples level 0. */
+     uint32_t levels, filter;
++    uint32_t palette;           /* guest address of the 256-entry CLUT (P8), 0 if none */
+ } Nv2aTexture;
+ 
+ typedef struct {
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+index 57e8f8e..d76eafb 100644
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -806,6 +806,9 @@ static void current_surface(Nv2aSurface *out)
+     out->bytes_per_pixel = surface_bpp();
+     out->aa_sx           = s_gpu.aa_sx > 1.5f ? 2 : 1;
+     out->aa_sy           = s_gpu.aa_sy > 1.5f ? 2 : 1;
++    out->clip_x          = s_gpu.clip_x;
++    out->clip_y          = s_gpu.clip_y;
++    out->clear_x0 = out->clear_y0 = out->clear_x1 = out->clear_y1 = 0;
+ }
+ 
+ /* Render state in the NV2A's own values, gathered from what the executor
+@@ -856,7 +859,7 @@ int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out)
+     s_gpu.texs[0].color  = tex->color;
+     s_gpu.texs[0].addr_u = 3;
+     s_gpu.texs[0].addr_v = 3;
+-    s_gpu.texs[0].palette = 0;          /* ponytail: no palettised formats */
++    s_gpu.texs[0].palette = tex->palette;
+     s_gpu.texs[0].levels = 1;
+     s_gpu.texs[0].filter = 0;
+     s_gpu.texs[0].cube   = 0;
+@@ -912,6 +915,14 @@ static void clear_surface(uint32_t param)
+             return;
+         current_surface(&surf);
+         current_render_state(&rs);
++        surf.clear_x0 = s_gpu.clip_x; surf.clear_x1 = s_gpu.clip_x + s_gpu.clip_w;
++        surf.clear_y0 = s_gpu.clip_y; surf.clear_y1 = s_gpu.clip_y + s_gpu.clip_h;
++        if ((s_gpu.clear_rect_set & 3) == 3) {
++            surf.clear_x0 = s_gpu.clear_rect_h & 0xFFFF;
++            surf.clear_x1 = (s_gpu.clear_rect_h >> 16) + 1;
++            surf.clear_y0 = s_gpu.clear_rect_v & 0xFFFF;
++            surf.clear_y1 = (s_gpu.clear_rect_v >> 16) + 1;
++        }
+         s_backend->clear(&surf, &rs, param, s_gpu.clear_color,
+                          s_gpu.zstencil_clear);
+         s_gpu.clears++;
+@@ -2217,6 +2228,7 @@ static void backend_flush(int textured)
+         tex.addr_v = s_gpu.texs[0].addr_v;
+         tex.levels = s_gpu.texs[0].pitch ? 1 : s_gpu.texs[0].levels;
+         tex.filter = s_gpu.texs[0].filter;
++        tex.palette = s_gpu.texs[0].palette;
+         batch.texture = &tex;
+     }
+     s_backend->draw(&surf, &batch);
+@@ -3341,9 +3353,50 @@ static void raster_batch_program(void)
+ 
+     if (!s_xf && !(s_xf = (Nv2aVshOutput *)calloc(NV_MAX_INDICES, sizeof *s_xf)))
+         return;
+-    for (i = 0; i < n; i++)
+-        if (!transform_vertex(s_gpu.idx[i], &s_xf[i]))
+-            return;                                    /* no program loaded */
++    /* Post-transform cache. Within one batch the attribute arrays, the
++     * constants and the program are fixed, so the same index always gives
++     * the same output -- unless the program writes c[] (CXT_WRITE), whose
++     * runs depend on order. An indexed mesh names each vertex 3..6 times;
++     * this runs the program once per vertex instead of once per index.
++     * Direct-mapped on the low index bits; a generation counter stands in
++     * for clearing the table between batches. RECOMP_XF_CACHE=0 turns it off. */
++    {
++        enum { XFC_BITS = 12, XFC_N = 1 << XFC_BITS };
++        static uint32_t tag[XFC_N], gen[XFC_N], slot[XFC_N], g;
++        static int on = -1;
++        static unsigned long long hits, runs;
++        int use;
++
++        if (on < 0) {
++            const char *e = getenv("RECOMP_XF_CACHE");
++            on = !(e && e[0] == '0');
++        }
++        use = on && !nv2a_vsh_cxt_write();
++        if (++g == 0) {                       /* wrapped: really clear once */
++            memset(gen, 0, sizeof gen);
++            g = 1;
++        }
++        for (i = 0; i < n; i++) {
++            uint32_t ix = s_gpu.idx[i], h = ix & (XFC_N - 1);
++
++            if (use && gen[h] == g && tag[h] == ix) {
++                s_xf[i] = s_xf[slot[h]];
++                hits++;
++                continue;
++            }
++            if (!transform_vertex(ix, &s_xf[i]))
++                return;                                /* no program loaded */
++            runs++;
++            if (use) {
++                gen[h] = g; tag[h] = ix; slot[h] = i;
++            }
++        }
++        if (on && (runs + hits) >= (1ull << 24)) {
++            fprintf(stderr, "[XF-CACHE] %.1f%% of vertices reused (%llu runs,"
++                    " %llu hits)\n", 100.0 * hits / (double)(runs + hits), runs, hits);
++            runs = hits = 0;
++        }
++    }
+     xf_set_viewport();
+     {
+         const VertexAttr *tc = texcoord_attr();
+diff --git a/src/kernel/nv2a_vsh_interp.c b/src/kernel/nv2a_vsh_interp.c
+index c7fd25d..787c904 100644
+--- a/src/kernel/nv2a_vsh_interp.c
++++ b/src/kernel/nv2a_vsh_interp.c
+@@ -84,6 +84,7 @@ void nv2a_vsh_set_start_slot(uint32_t slot)
+     }
+ }
+ void nv2a_vsh_set_cxt_write(uint32_t enable) { s_cxt_write = enable; }
++uint32_t nv2a_vsh_cxt_write(void) { return s_cxt_write; }
+ 
+ void nv2a_vsh_set_constant_load(uint32_t index)
+ {
+diff --git a/src/kernel/nv2a_vsh_interp.h b/src/kernel/nv2a_vsh_interp.h
+index 8acb0af..3601e75 100644
+--- a/src/kernel/nv2a_vsh_interp.h
++++ b/src/kernel/nv2a_vsh_interp.h
+@@ -43,6 +43,7 @@ void nv2a_vsh_set_start_slot(uint32_t slot);          /* _PROGRAM_START     */
+ void nv2a_vsh_set_constant_load(uint32_t index);      /* _CONSTANT_LOAD     */
+ void nv2a_vsh_constant_word(uint32_t word);           /* _CONSTANT(i)       */
+ void nv2a_vsh_set_cxt_write(uint32_t enable);         /* _CXT_WRITE_EN      */
++uint32_t nv2a_vsh_cxt_write(void);   /* program may write c[]: runs not repeatable */
+ 
+ /* Run the program from the start slot on one vertex. Inputs are the ten
+  * attribute values as floats. Returns 0 if there is no program to run (no
+diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
+index 0f1c02e..b05c8ed 100644
+--- a/src/kernel/xbox_memory_layout.c
++++ b/src/kernel/xbox_memory_layout.c
+@@ -835,6 +835,22 @@ int xbox_VehMmioFault(void *exception_pointers)
+     fault = (uintptr_t)ep->ExceptionRecord->ExceptionInformation[1];
+     if (!mmio_fault_va(fault, &va))
+         return 0;
++    {
++        /* Fault rate, every 5 s: each trapped access is a trip through the
++         * Windows exception dispatcher, so this is a direct cost meter. */
++        static volatile LONG apu_n, ohci_n;
++        static volatile LONG last_ms;
++        LONG now = (LONG)GetTickCount();
++        if (va >= MMIO_APU_BASE && va < MMIO_APU_END) InterlockedIncrement(&apu_n);
++        else InterlockedIncrement(&ohci_n);
++        if (!last_ms) InterlockedExchange(&last_ms, now);
++        else if ((DWORD)(now - last_ms) >= 5000
++                 && InterlockedExchange(&last_ms, now) != now) {
++            fprintf(stderr, "[MMIO-FAULTS] last 5 s: APU %ld, other %ld\n",
++                    (long)InterlockedExchange(&apu_n, 0),
++                    (long)InterlockedExchange(&ohci_n, 0));
++        }
++    }
+     if (va >= MMIO_APU_BASE && va < MMIO_APU_END)
+         return g_apu_state
+             && apu_hook_handle_mmio(ep->ContextRecord, fault, va,

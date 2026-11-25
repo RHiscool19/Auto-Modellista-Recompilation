@@ -10,5 +10,9 @@
   {
     "start": "0x0003DAF0",
     "note": "indirect-call target hit 384x at race start (Suzuka intro camera); sat in an undetected gap before sub_0003DB10"
+  },
+  {
+    "start": "0x001F2395",
+    "note": "indirect-call target that failed to resolve millions of times during races (inside the CRT/middleware block near 0x1F0E2D)"
   }
 ]
