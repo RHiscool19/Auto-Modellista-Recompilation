@@ -36,7 +36,15 @@ See [`NOTES.md`](NOTES.md) for the detailed bring-up log: XBE facts, addresses, 
 
 ### Dumping the game
 
-Dump your own disc (for example from a modded Xbox or an RGH Xbox 360 over FTP) and extract it with [extract-xiso](https://github.com/XboxDev/extract-xiso) or [xdvdfs](https://github.com/antangelo/xdvdfs). The extracted folder must contain `default.xbe`, `media\` and `src\`.
+Dump your own disc (for example from a modded Xbox or an RGH Xbox 360 over FTP). If you end up with an `.iso`, unpack it:
+
+1. Open **[xiso.antangelo.com](https://xiso.antangelo.com/)** in your browser (the web version of [xdvdfs](https://github.com/antangelo/xdvdfs); nothing to install).
+2. Choose **unpack**, select your `.iso`, and pick an empty output folder.
+3. Use that output folder as the game folder below.
+
+Command-line alternatives: [extract-xiso](https://github.com/XboxDev/extract-xiso) (`extract-xiso -x game.iso`) or the [xdvdfs CLI](https://github.com/antangelo/xdvdfs) (`xdvdfs unpack game.iso out\`).
+
+The extracted folder must contain `default.xbe`, `media\` and `src\`. The unpacked game is about 1.5 GB even though the ISO is much larger; the rest of the image is padding.
 
 Check you have the expected executable:
 
