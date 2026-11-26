@@ -73,11 +73,9 @@ cd Auto-Modellista-Recompilation
 
 If you already cloned without `--recurse-submodules`: `git submodule update --init`.
 
-Then apply this project's changes to the toolkit (once per clone):
-
-```
-powershell -ExecutionPolicy Bypass -File .\scripts\apply-patches.ps1
-```
+The submodule is this project's fork of the toolkit
+([RHiscool19/xboxrecomp](https://github.com/RHiscool19/xboxrecomp), branch `automodellista`): sp00nznet's
+xboxrecomp plus the changes this port needs, so no patching step is needed.
 
 ### 2. Generate the recompiled code
 
@@ -151,9 +149,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run.ps1 -D3D11
 | `config/seed_functions.json` | Function entry points the disassembler misses, found by running the game |
 | `scripts/regen.ps1` | Runs the recompilation pipeline |
 | `scripts/run.ps1` | Runs the game with the right runtime settings and logging |
-| `scripts/apply-patches.ps1` | Applies `patches/` to the toolkit submodule |
-| `patches/xboxrecomp-automodellista.patch` | This project's changes to the toolkit (renderer interface, vertex cache, diagnostics) |
-| `external/xboxrecomp` | The toolkit (git submodule) |
+| `scripts/apply-patches.ps1`, `patches/` | Old way of carrying the toolkit changes (kept for one release; the fork replaces it) |
+| `external/xboxrecomp` | The toolkit (git submodule, fork RHiscool19/xboxrecomp, branch `automodellista`) |
 | `NOTES.md` | Bring-up log |
 
 ## Known issues
