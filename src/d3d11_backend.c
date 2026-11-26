@@ -410,6 +410,7 @@ typedef struct {
      * GPU copy of it was only ever cleared. */
     uint32_t gpu_frame, cpu_frame, guest_hash, hash_frame;
     int      hash_init;
+    uint32_t draws_since_flip;    /* 0 at a flip: cleared but never drawn -> don't show it */
 } Target;
 
 #define MAX_TARGETS 32
@@ -417,6 +418,10 @@ static Target   s_targets[MAX_TARGETS];
 static Target  *s_bound;           /* currently bound as render target */
 static Target  *s_present;         /* the surface to show at flip */
 /* Per-interval counters, printed every ~5 s (RECOMP_D3D11_STATS=0 silences). */
+static unsigned s_st_held;
+static unsigned s_st_uploads, s_st_evicts;     /* texture decodes / cache evictions */
+static double   s_st_upload_ms, s_st_upload_max_ms;          /* flips that would have shown an empty frame */
+static int      s_shown_once;
 static unsigned s_st_draws, s_st_texreq, s_st_texok, s_st_rtt, s_st_rtt_self, s_st_rtt_guest;
 static uint32_t s_frame = 1;
 
@@ -652,7 +657,21 @@ static void tex_release(TexEntry *e)
     if (e->tex) { ID3D11Texture2D_Release(e->tex); e->tex = NULL; }
 }
 
+static void tex_upload_impl(TexEntry *e, const Nv2aTexture *t);
 static void tex_upload(TexEntry *e, const Nv2aTexture *t)
+{
+    LARGE_INTEGER a, b, f;
+    double ms;
+    QueryPerformanceCounter(&a);
+    tex_upload_impl(e, t);
+    QueryPerformanceCounter(&b);
+    QueryPerformanceFrequency(&f);
+    ms = (double)(b.QuadPart - a.QuadPart) * 1000.0 / (double)f.QuadPart;
+    s_st_uploads++;
+    s_st_upload_ms += ms;
+    if (ms > s_st_upload_max_ms) s_st_upload_max_ms = ms;
+}
+static void tex_upload_impl(TexEntry *e, const Nv2aTexture *t)
 {
     D3D11_TEXTURE2D_DESC td;
     D3D11_SUBRESOURCE_DATA sd;
@@ -716,15 +735,25 @@ static ID3D11ShaderResourceView *tex_get(const Nv2aTexture *t)
          * staggered by slot, so a static menu doesn't pay to re-hash every
          * background every frame (menus fell from 60 to 40 fps when it did). */
         int slot = (int)(e - s_tex);
-        int recheck = e->dynamic || e->checked_frame != s_frame;
+        /* Small textures (<= 64 KB: glyph caches, icons) are hashed whole on
+         * every draw -- the game writes letters into them between draws of
+         * the same frame, and anything coarser left letters missing. */
+        int small = tex_bytes(t) <= 64u * 1024u;
+        int recheck = e->dynamic || small || e->checked_frame != s_frame;
         if (recheck) {
-            int full = e->dynamic || ((s_frame + (uint32_t)slot) & 31u) == 0;
+            int full = e->dynamic || small || ((s_frame + (uint32_t)slot) & 31u) == 0;
             uint32_t h;
             h = tex_hash(t, full);
             e->checked_frame = s_frame;
             if (full) {
                 if (h != e->hash_full) {
-                    if (e->hash_full_valid) e->dynamic = 1;
+                    if (e->hash_full_valid && !e->dynamic) {
+                        static int told;
+                        e->dynamic = 1;
+                        if (told++ < 40)
+                            fprintf(stderr, "[D3D11] dynamic texture 0x%08X %ux%u fmt 0x%02X pitch %u (%u bytes)\n",
+                                    t->offset, t->width, t->height, t->color, t->pitch, tex_bytes(t));
+                    }
                     e->hash_full = h; e->hash_full_valid = 1;
                     tex_upload(e, t);
                     e->hash = tex_hash(t, 0);
@@ -740,6 +769,7 @@ static ID3D11ShaderResourceView *tex_get(const Nv2aTexture *t)
         return e->srv;
     }
     e = &s_tex[free_slot >= 0 ? free_slot : lru];
+    if (free_slot < 0) s_st_evicts++;
     tex_release(e);
     memset(e, 0, sizeof *e);
     e->used = 1;
@@ -1048,6 +1078,7 @@ static void be_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     t = target_get(s);
     if (!t) return;
     t->gpu_frame = s_frame;
+    t->draws_since_flip++;
     note_depth_range(rs);
     note_present_candidate(t, s);
 
@@ -1220,7 +1251,18 @@ static void be_flip(void)
     s_bound = NULL;
     ID3D11DeviceContext_ClearRenderTargetView(s_ctx, s_back_rtv, black);
 
+    /* A flip whose surface got no draws since the last flip would show a
+     * cleared, empty frame: the occasional one-frame black flash seen in
+     * races. Keep the previous image on screen instead (skip this Present). */
+    if (s_present && !s_present->draws_since_flip && s_shown_once) {
+        int i;
+        s_st_held++;
+        for (i = 0; i < MAX_TARGETS; i++) s_targets[i].draws_since_flip = 0;
+        s_frame++;
+        return;
+    }
     if (s_present && cr.right > 0 && cr.bottom > 0) {
+        s_shown_once = 1;
         /* Letterbox to 4:3. */
         float W = (float)cr.right, H = (float)cr.bottom, w = W, h = W * 3.0f / 4.0f;
         if (h > H) { h = H; w = H * 4.0f / 3.0f; }
@@ -1241,6 +1283,10 @@ static void be_flip(void)
         ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, 1, &none);
     }
     IDXGISwapChain_Present(s_swap, 0, 0);
+    {
+        int i;
+        for (i = 0; i < MAX_TARGETS; i++) s_targets[i].draws_since_flip = 0;
+    }
     s_frame++;
 
     fps_frames++;
@@ -1257,11 +1303,14 @@ static void be_flip(void)
                 int i, nt = 0;
                 for (i = 0; i < MAX_TARGETS; i++) if (s_targets[i].tex) nt++;
                 fprintf(stderr, "[D3D11] %u draws (%u combiner, %u fallback), textured %u/%u (rtt %u, self %u, guest %u), %u regrows,"
-                        " %d targets, present 0x%08X %ux%u\n",
+                        " %d targets, present 0x%08X %ux%u, %u empty flips held,"
+                        " %u tex uploads (%.0f ms total, worst %.1f ms), %u evictions\n",
                         s_st_draws, s_st_rc, s_st_rc_skip, s_st_texok, s_st_texreq, s_st_rtt, s_st_rtt_self, s_st_rtt_guest, s_st_regrow, nt,
                         s_present ? s_present->color_va : 0,
-                        s_present ? s_present->w : 0, s_present ? s_present->h : 0);
-                s_st_draws = s_st_texreq = s_st_texok = s_st_rtt = s_st_rtt_self = s_st_rtt_guest = s_st_regrow = s_st_rc = s_st_rc_skip = 0;
+                        s_present ? s_present->w : 0, s_present ? s_present->h : 0, s_st_held,
+                        s_st_uploads, s_st_upload_ms, s_st_upload_max_ms, s_st_evicts);
+                s_st_uploads = s_st_evicts = 0; s_st_upload_ms = s_st_upload_max_ms = 0.0;
+                s_st_draws = s_st_texreq = s_st_texok = s_st_rtt = s_st_rtt_self = s_st_rtt_guest = s_st_regrow = s_st_rc = s_st_rc_skip = s_st_held = 0;
             }
         }
         fps_t0 = GetTickCount();

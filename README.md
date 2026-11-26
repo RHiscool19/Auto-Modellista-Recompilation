@@ -4,11 +4,13 @@ A static recompilation of **Auto Modellista** (Capcom, 2003, original Xbox, USA/
 
 The game's x86 code is translated ahead of time into C and compiled with MSVC. There is no emulator or interpreter at runtime. The toolkit's runtime libraries stand in for the Xbox kernel, Direct3D 8, DirectSound and the controller hardware.
 
+> **Photosensitivity warning:** this is an early alpha. The screen can flash or flicker (for example a single black frame during a race). If you are sensitive to flashing images, take care or wait for a later release.
+
 > **No game code or assets are included in this repository.** You need your own legally obtained copy of the game. Generated code is derived from the game and is never committed.
 
 ## Status
 
-Alpha. On the GPU renderer the game boots, runs its menus at full speed and races at 15–30 fps (sometimes 60). A full race has not been completed yet.
+Alpha. On the GPU renderer the game boots, runs its menus at full speed, and full races (results and replay included) play at 15–40 fps.
 
 There are two renderers. The **D3D11 renderer** (`run.ps1 -D3D11`) draws on the GPU and is the one to use. The original **CPU renderer** (the default) is kept as a reference and is much slower.
 
@@ -19,9 +21,9 @@ There are two renderers. The **D3D11 renderer** (`run.ps1 -D3D11`) draws on the 
 | Arcade → single race → car select (3D car preview) | ✅ | ✅ |
 | Textures, transparency, sky | ✅ | ⚠️ alpha-tested scenery dithered, striped dialog background |
 | Car shading | ✅ correct colours | ❌ black / flickering |
-| In race (Suzuka tested) | ✅ 15–30 fps | ⚠️ slow |
-| Pause menu | ⚠️ very faint, selected option not highlighted | ? |
-| Menu description text | ⚠️ some letters missing | ✅ |
+| In race (Suzuka, US speedway, Osaka tested) | ✅ 15–40 fps | ⚠️ slow |
+| Pause menu | ✅ | ✅ |
+| Menu and dialog text | ⚠️ a few letters can be missing | ✅ |
 | Controller (XInput pads via the emulated USB controller), rumble | ✅ | ✅ |
 | Audio (music, sound effects) | ✅ (stutter fix being tested) | ✅ |
 
@@ -156,9 +158,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run.ps1 -D3D11
 
 ## Known issues
 
-- **Race performance.** 15–30 fps, not yet a steady 60.
-- **Pause menu** is barely visible and does not highlight the selected option; **some letters are missing** from menu description text. Both are likely the D3D11 renderer not yet supporting the Xbox GPU's register combiners.
-- **Audio** from a race can keep playing after quitting to the title screen.
+- **Flashing.** The screen can occasionally show a single black frame in races. A guard now suppresses most of these, but keep the photosensitivity warning above in mind.
+- **Race performance.** 15–40 fps depending on the track, not yet a steady 60. Frame hitches also cause audio stutter.
+- **Text.** A few letters can still be missing from menu and dialog text.
+- **Fog** is not drawn yet on the D3D11 renderer.
 - **CPU renderer.** Slow, car bodies render black. Use `-D3D11`.
 - **Occasional crash at startup** in the USB interrupt path, likely a timing race. Relaunching works.
 - **Xbox Live** features are not supported.

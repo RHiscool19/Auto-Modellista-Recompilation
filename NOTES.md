@@ -154,6 +154,9 @@ Analysis output lives outside the repo in `C:\AMRecomp\work\` (derived from game
 - Quick win to test first: present via the back end instead of GDI (gdi32 8%)
 
 ## Goals
+README carries a photosensitivity warning (occasional one-frame black flash in races). Keep it until flashing is
+confirmed gone across many runs.
+
 Done (D3D11 renderer, 2026-11-25):
 - ~~Menu speed~~: 60 fps on -D3D11 (vertex cache + GPU drawing)
 - ~~Striped save/load dialog background~~: correct on -D3D11
@@ -169,7 +172,9 @@ Open, in order (2026-11-25 evening):
    Also menu stutter remains (APU thread gaps up to 90 ms even with the 128 ms buffer).
 4. **Combiners**: 6 programs in the whole game; 5 run. The 6th is fog (final 130C0300 = mix(fog, r0, fog.a)) -> pass
    fog colour + per-vertex fog factor next. Pause menu correct.
-5. Race 15-35 fps (Suzuka/US speedway). Full single race + results + replay work.
+5. **Occasional one-frame black flash in races**: guard added (a flip whose surface got no draws since the last
+   flip is not presented; stats line counts `empty flips held`). If flashes persist, the cause is elsewhere.
+6. Race 15-35 fps (Suzuka/US speedway). Full single race + results + replay work.
 6. Release v0.2.0-alpha after 1-2 test.
 7. Later: GPU vertex programs, APU MMIO without exceptions, honest sub_00209540, USB ISR race, Switch branch
 
