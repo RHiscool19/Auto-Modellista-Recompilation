@@ -223,3 +223,30 @@ external/xboxrecomp is sp00nznet's repo and can't be pushed to. Our edits to it 
 patches/xboxrecomp-automodellista.patch (regenerate with
 `git -C external/xboxrecomp diff > patches/xboxrecomp-automodellista.patch`) and applied by
 scripts/apply-patches.ps1. Never commit inside the submodule.
+
+## Plan: companion app that verifies AND builds (post v0.2.0)
+Goal: one-click setup without distributing anything derived from the game.
+1. Verify: user picks ISO/folder, check default.xbe SHA-1 4094e271290350248b06af87826896ffa84f2554.
+2. Extract: xdvdfs as a library (no web tool needed).
+3. Generate: run the recompiler on the user's XBE (Python tools bundled via PyInstaller -> no Python/capstone install).
+4. Compile: only the generated C (~1.8M lines) on the user's machine; xboxrecomp runtime + D3D11 back end ship
+   precompiled as a static library (not game-derived).
+5. Install: exe + game files + config.ini in one folder.
+Compiler: MSVC can't be redistributed (could winget-install Build Tools, but multi-GB). Preferred: llvm-mingw
+(clang + MinGW, redistributable, ~300-500 MB, has Windows/D3D11 headers). Unknown: MSVC-only constructs in the
+toolkit/generated code (SEH, pragmas) -> first step is a clang build of the project. Also groundwork for the Switch
+(devkitPro is GCC/clang-based); the same app could later emit a Switch build.
+Costs: first build ~5-20 min, ~0.5 GB download, support for failed builds (clear logs).
+Order: (a) clang/llvm-mingw build of the project, (b) config.ini + first-run game-folder setup in the exe (replaces the
+compile-time AM_GAME_DIR), (c) GUI wrapper for verify/extract/generate/build. Later: remapping, texture packs,
+resolution scale, button-prompt style in the same app.
+
+## Plan: button prompts (texture replacement)
+- The original Xbox pad has White and Black buttons; modern pads use LB/RB in their place. Replace the White/Black
+  prompt icons (e.g. the replay screen's "change view" circles) with LB/RB icons, and optionally the whole prompt
+  set by controller type (Xbox Series / PlayStation / auto).
+- Mechanism: texture dump + replace keyed by the back end's content hash (same system as HD texture packs).
+  Dump the prompt textures once, map hash -> replacement PNG in a folder, load at upload time.
+- Replacement art must be original (drawn for the project) if it ships in the repo; ripped icons load only from the
+  user's own folder, never committed.
+- Input side confirmed (2026-11-25): the emulated pad maps LB/RB to White/Black, so only the icons need changing.

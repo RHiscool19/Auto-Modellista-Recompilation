@@ -18,5 +18,9 @@
   {
     "start": "0x000E02A0",
     "note": "indirect-call target that failed millions of times on Osaka hi.way (sub-1 fps)"
+  },
+  {
+    "start": "0x0008E880",
+    "note": "vtable-dispatch thunk ([obj+0x110] -> table 0x37FDF0) swallowed by the tail-jump alias sub_0008E870; its indirect calls failed ~230x late in a session with sounds left hanging"
   }
 ]

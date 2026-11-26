@@ -45,7 +45,7 @@
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 
 /* The input layout below assumes this exact layout. */
-typedef char nv2a_vertex_is_28_bytes[(sizeof(Nv2aVertex) == 28) ? 1 : -1];
+typedef char nv2a_vertex_is_32_bytes[(sizeof(Nv2aVertex) == 32) ? 1 : -1];
 
 /* ---- Device and window ------------------------------------------------ */
 
@@ -82,9 +82,10 @@ typedef struct {
     float    f0[8][4], f1[8][4];  /* factor0/1 as r,g,b,a */
     uint32_t fin[4];              /* final0, final1, control, stage_program */
     float    fc0[4], fc1[4];
+    float    fog[4];              /* fog colour (rgb); .a unused (per-vertex) */
     uint32_t on[4];
 } RcConsts;
-typedef char rc_consts_is_448[(sizeof(RcConsts) == 448) ? 1 : -1];
+typedef char rc_consts_is_464[(sizeof(RcConsts) == 464) ? 1 : -1];
 static ID3D11Buffer *s_rc_cb;
 static int           s_rc_enabled = 1;   /* AM_D3D11_COMBINERS=0 turns them off */
 static unsigned      s_st_rc;            /* draws that went through the combiners */
@@ -92,7 +93,7 @@ static unsigned      s_st_rc;            /* draws that went through the combiner
 static unsigned      s_st_rc_skip;       /* combiner programs that need inputs we don't pass yet */
 
 /* 1 if the program reads only what this back end supplies: v0, t0, c0/c1,
- * zero, r0/r1. Registers 3 (fog), 5 (v1) and 9-11 (t1-t3), or texture stages
+ * zero, r0/r1, fog (3). Registers 5 (v1) and 9-11 (t1-t3), or texture stages
  * 1-3 switched on, need inputs the interface does not carry yet; such a
  * program is drawn as texture x diffuse instead, which is what the game
  * looked like before combiners and is far closer than a black result. */
@@ -105,17 +106,17 @@ static int rc_supported(const Nv2aBackendCombiner *bc)
         for (k = 0; k < 4; k++) {
             uint32_t c = (bc->color_icw[s] >> (8 * k)) & 0xFF, a = (bc->alpha_icw[s] >> (8 * k)) & 0xFF;
             uint32_t rc_ = c & 0xF, ra = a & 0xF;
-            if (rc_ == 3 || rc_ == 5 || (rc_ >= 9 && rc_ <= 11)) return 0;
-            if (ra == 3 || ra == 5 || (ra >= 9 && ra <= 11)) return 0;
+            if (rc_ == 5 || (rc_ >= 9 && rc_ <= 11)) return 0;
+            if (ra == 5 || (ra >= 9 && ra <= 11)) return 0;
         }
     if (bc->final0 || bc->final1) {
         for (k = 0; k < 4; k++) {
             uint32_t r0_ = (bc->final0 >> (8 * k)) & 0xF;
-            if (r0_ == 3 || r0_ == 5 || r0_ == 14 || (r0_ >= 9 && r0_ <= 11)) return 0;
+            if (r0_ == 5 || r0_ == 14 || (r0_ >= 9 && r0_ <= 11)) return 0;
         }
         for (k = 1; k < 4; k++) {                      /* E, F, G (byte 0 is flags) */
             uint32_t r1_ = (bc->final1 >> (8 * k)) & 0xF;
-            if (r1_ == 3 || r1_ == 5 || r1_ == 14 || (r1_ >= 9 && r1_ <= 11)) return 0;
+            if (r1_ == 5 || r1_ == 14 || (r1_ >= 9 && r1_ <= 11)) return 0;
         }
     }
     return 1;
@@ -137,8 +138,8 @@ static const char s_hlsl[] =
 "  float2 rtSize; float zscale; float textured;\n"
 "  float alphaFunc; float alphaRef; float2 texSize; };\n"
 "Texture2D T : register(t0); SamplerState S : register(s0);\n"
-"struct VI { float4 p : POSITION; float4 c : COLOR; float2 uv : TEXCOORD; };\n"
-"struct PI { float4 pos : SV_Position; float4 c : COLOR; float2 uv : TEXCOORD; };\n"
+"struct VI { float4 p : POSITION; float4 c : COLOR; float2 uv : TEXCOORD; float fog : FOG; };\n"
+"struct PI { float4 pos : SV_Position; float4 c : COLOR; float2 uv : TEXCOORD; float fog : FOG; };\n"
 "PI vs_main(VI i) {\n"
 "  PI o;\n"
 "  float w = i.p.w > 0.0 ? 1.0 / i.p.w : 1.0;\n"
@@ -146,11 +147,11 @@ static const char s_hlsl[] =
 "  float y = 1.0 - i.p.y / rtSize.y * 2.0;\n"
 "  float z = saturate(i.p.z / zscale);\n"
 "  o.pos = float4(x * w, y * w, z * w, w);\n"
-"  o.c = i.c; o.uv = i.uv / texSize;\n"
+"  o.c = i.c; o.uv = i.uv / texSize; o.fog = i.fog;\n"
 "  return o; }\n"
 "cbuffer RC : register(b1) {\n"
 "  uint4 rcSt[8]; float4 rcF0[8]; float4 rcF1[8];\n"
-"  uint4 rcFin; float4 rcFc0; float4 rcFc1; uint4 rcOn; };\n"
+"  uint4 rcFin; float4 rcFc0; float4 rcFc1; float4 rcFog; uint4 rcOn; };\n"
 "float mapIn(float x, uint b) {\n"
 "  float p = max(x, 0.0); uint m = (b >> 5) & 7;\n"
 "  if (m == 0) return p; if (m == 1) return 1.0 - saturate(x);\n"
@@ -167,14 +168,15 @@ static const char s_hlsl[] =
 "  return float3(mapIn(v.x, b), mapIn(v.y, b), mapIn(v.z, b)); }\n"
 "float rdA(float4 R[16], uint b) {\n"
 "  b &= 0xFF; float4 r = R[b & 15]; return mapIn((b & 16) ? r.a : r.b, b); }\n"
-"float4 rcEval(float4 v0, float4 t0) {\n"
+"float4 rcEval(float4 v0, float4 t0, float fogf) {\n"
 "  float4 R[16]; uint k;\n"
 "  [unroll] for (k = 0; k < 16; k++) R[k] = float4(0, 0, 0, 0);\n"
+"  R[3] = float4(rcFog.rgb, fogf);\n"
 "  R[4] = v0; R[8] = t0; R[9] = float4(0,0,0,1); R[10] = float4(0,0,0,1); R[11] = float4(0,0,0,1);\n"
-"  R[12].a = (rcFin.w & 0x1F) ? t0.a : 1.0;\n"
-"  uint n = min(rcFin.z & 0xFF, 8), fl0 = rcFin.z >> 8;\n"
-"  [loop] for (uint s = 0; s < n; s++) {\n"
-"    uint icw = rcSt[s].x, aicw = rcSt[s].y, ocw = rcSt[s].z, aocw = rcSt[s].w;\n"
+"  R[12].a = (RCFIN.w & 0x1F) ? t0.a : 1.0;\n"
+"  uint n = min(RCFIN.z & 0xFF, 8), fl0 = RCFIN.z >> 8;\n"
+"  RC_LOOP for (uint s = 0; s < n; s++) {\n"
+"    uint icw = RCST[s].x, aicw = RCST[s].y, ocw = RCST[s].z, aocw = RCST[s].w;\n"
 "    uint fl = ocw >> 12, afl = aocw >> 12, d;\n"
 "    R[1] = rcF0[(fl0 & 0x010) ? s : 0]; R[2] = rcF1[(fl0 & 0x100) ? s : 0];\n"
 "    bool mux = (fl0 & 1) ? (R[12].a >= 0.5) : ((((int)(R[12].a * 255.0)) & 1) != 0);\n"
@@ -199,8 +201,8 @@ static const char s_hlsl[] =
 "    d = (aocw >> 8) & 15; if (d) R[d].a = ams;\n"
 "    R[0] = float4(0, 0, 0, 0); }\n"
 "  float4 o;\n"
-"  if (rcFin.x || rcFin.y) {\n"
-"    uint f0 = rcFin.x, f1 = rcFin.y, ff = f1 & 0xFF;\n"
+"  if (RCFIN.x || RCFIN.y) {\n"
+"    uint f0 = RCFIN.x, f1 = RCFIN.y, ff = f1 & 0xFF;\n"
 "    R[1] = rcFc0; R[2] = rcFc1;\n"
 "    float3 sa = (ff & 0x40) ? 1.0 - R[5].rgb : R[5].rgb;\n"
 "    float3 sb = (ff & 0x20) ? 1.0 - R[12].rgb : R[12].rgb;\n"
@@ -215,7 +217,7 @@ static const char s_hlsl[] =
 "  float4 col;\n"
 "  if (rcOn.x) {\n"
 "    float4 t0 = (textured > 0.5) ? T.Sample(S, i.uv) : float4(0, 0, 0, 1);\n"
-"    col = rcEval(i.c, t0);\n"
+"    col = rcEval(i.c, t0, i.fog);\n"
 "  } else {\n"
 "    col = i.c;\n"
 "    if (textured > 0.5) col *= T.Sample(S, i.uv);\n"
@@ -237,12 +239,28 @@ static const char s_hlsl[] =
 "  o.pos = float4(t * float2(2, -2) + float2(-1, 1), 0, 1); o.uv = t; return o; }\n"
 "float4 blit_ps(BO i) : SV_Target { float4 c = T.Sample(S, i.uv); return float4(c.rgb, 1); }\n";
 
-static ID3DBlob *compile(const char *entry, const char *target)
+/* The combiner evaluator reads its registers by index. With the program in
+ * a constant buffer the GPU has to keep them in an indexable scratch array,
+ * which made every combiner pixel slow (menus ran at ~16 fps once fog moved
+ * every draw onto this path). The generic shader still works that way; each
+ * program the game uses also gets its own copy with the stage words baked in
+ * as constants and the loop unrolled, so every index is known at compile time
+ * and the registers are plain registers. */
+static const char s_generic_prefix[] =
+    "#define RCST rcSt\n#define RCFIN rcFin\n#define RC_LOOP [loop]\n";
+
+static ID3DBlob *compile_src(const char *prefix, const char *entry, const char *target)
 {
     ID3DBlob *code = NULL, *err = NULL;
-    HRESULT hr = D3DCompile(s_hlsl, sizeof s_hlsl - 1, "am_d3d11", NULL, NULL,
-                            entry, target, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
-                            &code, &err);
+    size_t pl = strlen(prefix), hl = sizeof s_hlsl - 1;
+    char *src = (char *)malloc(pl + hl + 1);
+    HRESULT hr;
+    if (!src) return NULL;
+    memcpy(src, prefix, pl); memcpy(src + pl, s_hlsl, hl); src[pl + hl] = 0;
+    hr = D3DCompile(src, pl + hl, "am_d3d11", NULL, NULL,
+                    entry, target, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
+                    &code, &err);
+    free(src);
     if (FAILED(hr)) {
         fprintf(stderr, "[D3D11] shader %s failed: %s\n", entry,
                 err ? (const char *)ID3D10Blob_GetBufferPointer(err) : "?");
@@ -251,6 +269,49 @@ static ID3DBlob *compile(const char *entry, const char *target)
     }
     if (err) ID3D10Blob_Release(err);
     return code;
+}
+
+static ID3DBlob *compile(const char *entry, const char *target)
+{
+    return compile_src(s_generic_prefix, entry, target);
+}
+
+/* Per-program pixel shaders (see s_generic_prefix). */
+#define MAX_RC_PS 64
+typedef struct { uint32_t key[36]; ID3D11PixelShader *ps; int failed; } RcPs;
+static RcPs s_rc_ps[MAX_RC_PS];
+static int  s_rc_ps_n;
+
+static ID3D11PixelShader *rc_ps_for(const uint32_t st[8][4], const uint32_t fin[4])
+{
+    uint32_t key[36];
+    char pre[2048];
+    int i, n = 0;
+    ID3DBlob *blob;
+    RcPs *e;
+    memcpy(key, st, 32 * 4); memcpy(key + 32, fin, 16);
+    for (i = 0; i < s_rc_ps_n; i++)
+        if (!memcmp(s_rc_ps[i].key, key, sizeof key))
+            return s_rc_ps[i].failed ? NULL : s_rc_ps[i].ps;
+    if (s_rc_ps_n >= MAX_RC_PS) return NULL;
+    n += snprintf(pre + n, sizeof pre - n, "static const uint4 kSt[8] = {");
+    for (i = 0; i < 8; i++)
+        n += snprintf(pre + n, sizeof pre - n, "%suint4(%uu,%uu,%uu,%uu)", i ? "," : "",
+                      st[i][0], st[i][1], st[i][2], st[i][3]);
+    n += snprintf(pre + n, sizeof pre - n,
+                  "};\nstatic const uint4 kFin = uint4(%uu,%uu,%uu,%uu);\n"
+                  "#define RCST kSt\n#define RCFIN kFin\n#define RC_LOOP [unroll]\n",
+                  fin[0], fin[1], fin[2], fin[3]);
+    e = &s_rc_ps[s_rc_ps_n++];
+    memcpy(e->key, key, sizeof key);
+    blob = compile_src(pre, "ps_main", "ps_5_0");
+    if (blob) {
+        ID3D11Device_CreatePixelShader(s_dev, ID3D10Blob_GetBufferPointer(blob),
+                                       ID3D10Blob_GetBufferSize(blob), NULL, &e->ps);
+        ID3D10Blob_Release(blob);
+    }
+    e->failed = !e->ps;
+    return e->ps;
 }
 
 /* ---- Window ------------------------------------------------------------- */
@@ -292,7 +353,7 @@ static int init(void)
     WNDCLASSA wc;
     RECT r = { 0, 0, 1280, 960 };
     DXGI_SWAP_CHAIN_DESC sd;
-    D3D11_INPUT_ELEMENT_DESC ie[3];
+    D3D11_INPUT_ELEMENT_DESC ie[4];
     D3D11_BUFFER_DESC bd;
     D3D11_RASTERIZER_DESC rd;
     D3D11_SAMPLER_DESC smp;
@@ -347,7 +408,8 @@ static int init(void)
     ie[0].SemanticName = "POSITION"; ie[0].Format = DXGI_FORMAT_R32G32B32A32_FLOAT; ie[0].AlignedByteOffset = 0;
     ie[1].SemanticName = "COLOR";    ie[1].Format = DXGI_FORMAT_B8G8R8A8_UNORM;     ie[1].AlignedByteOffset = 16;
     ie[2].SemanticName = "TEXCOORD"; ie[2].Format = DXGI_FORMAT_R32G32_FLOAT;       ie[2].AlignedByteOffset = 20;
-    hr = ID3D11Device_CreateInputLayout(s_dev, ie, 3, ID3D10Blob_GetBufferPointer(vs),
+    ie[3].SemanticName = "FOG";      ie[3].Format = DXGI_FORMAT_R32_FLOAT;          ie[3].AlignedByteOffset = 28;
+    hr = ID3D11Device_CreateInputLayout(s_dev, ie, 4, ID3D10Blob_GetBufferPointer(vs),
                                         ID3D10Blob_GetBufferSize(vs), &s_layout);
     ID3D10Blob_Release(vs); ID3D10Blob_Release(ps); ID3D10Blob_Release(bvs); ID3D10Blob_Release(bps);
     if (FAILED(hr)) return 0;
@@ -426,12 +488,15 @@ static unsigned s_st_draws, s_st_texreq, s_st_texok, s_st_rtt, s_st_rtt_self, s_
 static uint32_t s_frame = 1;
 
 static uint32_t tex_hash(const Nv2aTexture *t, int full);
+static int s_tex_force_full;      /* set around tex_get for CPU-fed render targets */
 
 /* 1: sample this target from guest memory instead of the GPU copy. */
 static int target_cpu_newer(Target *rt, const Nv2aTexture *tx)
 {
     if (rt->hash_frame != s_frame) {
-        uint32_t h = tex_hash(tx, 0);
+        /* Whole hash: the game may write a few glyphs into a CPU-fed
+         * surface, and a sparse sample missed them (letters stayed blank). */
+        uint32_t h = tex_hash(tx, 2);
         rt->hash_frame = s_frame;
         if (!rt->hash_init) { rt->hash_init = 1; rt->guest_hash = h; }
         else if (h != rt->guest_hash) { rt->guest_hash = h; rt->cpu_frame = s_frame; }
@@ -609,6 +674,14 @@ static uint32_t nv_format_bpp(uint32_t f)
     }
 }
 
+/* NV097 linear colour formats (as d3d8_format_is_swizzled lists them). */
+static int nv_format_linear(uint32_t f)
+{
+    return (f >= 0x10 && f <= 0x18) || (f >= 0x1B && f <= 0x20) ||
+           (f >= 0x2E && f <= 0x31) || (f >= 0x35 && f <= 0x37) ||
+           (f >= 0x3D && f <= 0x41);
+}
+
 /* Bytes the texture occupies in guest memory (level 0). */
 static uint32_t tex_bytes(const Nv2aTexture *t)
 {
@@ -616,7 +689,12 @@ static uint32_t tex_bytes(const Nv2aTexture *t)
     if (t->color == 0x0C) blk = 8;
     else if (t->color == 0x0E || t->color == 0x0F) blk = 16;
     if (blk) return ((t->width + 3) / 4) * ((t->height + 3) / 4) * blk;
-    if (t->pitch) return t->pitch * t->height;
+    /* Only linear (LIN_) formats use the pitch. A swizzled texture can
+     * arrive with a stale pitch from an earlier linear one: the glyph sheet
+     * (P8 128x128, 16 KB) came through as 2560 x 128 = 320 KB, so it was
+     * treated as big, never hashed whole, and its sparse samples landed
+     * mostly outside it -- new letters stayed blank. */
+    if (t->pitch && nv_format_linear(t->color)) return t->pitch * t->height;
     return t->width * t->height * nv_format_bpp(t->color);
 }
 
@@ -636,7 +714,7 @@ static uint32_t tex_hash(const Nv2aTexture *t, int full)
     if (len < 8) len = 8;
     if (!guest_readable(t->offset, len)) return 0;
     base = (const uint8_t *)xbox_GetMemoryOffset() + t->offset;
-    if (full && len <= TEX_FULL_HASH_MAX) {
+    if (full == 2 || (full && len <= TEX_FULL_HASH_MAX)) {   /* 2: whole, any size */
         const uint64_t *q = (const uint64_t *)base;
         uint32_t n = len / 8;
         for (i = 0; i < n; i++) { h ^= q[i]; h *= 1099511628211ull; }
@@ -735,15 +813,20 @@ static ID3D11ShaderResourceView *tex_get(const Nv2aTexture *t)
          * staggered by slot, so a static menu doesn't pay to re-hash every
          * background every frame (menus fell from 60 to 40 fps when it did). */
         int slot = (int)(e - s_tex);
-        /* Small textures (<= 64 KB: glyph caches, icons) are hashed whole on
-         * every draw -- the game writes letters into them between draws of
-         * the same frame, and anything coarser left letters missing. */
-        int small = tex_bytes(t) <= 64u * 1024u;
-        int recheck = e->dynamic || small || e->checked_frame != s_frame;
+        /* Text is drawn from a glyph sheet the game fills in as it needs
+         * letters. The sheet is bigger than TEX_FULL_HASH_MAX, so it only
+         * ever got the sparse check, which steps over a newly drawn letter:
+         * the letter stayed blank until the menu was re-entered. Now the
+         * periodic check hashes the whole texture whatever its size, and a
+         * texture that has changed once (dynamic) is hashed whole every
+         * frame -- every draw if it is small. CPU-fed render targets
+         * (s_tex_force_full) are checked whole on every draw. */
+        int big = tex_bytes(t) > TEX_FULL_HASH_MAX;
+        int recheck = s_tex_force_full || (e->dynamic && !big) || e->checked_frame != s_frame;
         if (recheck) {
-            int full = e->dynamic || small || ((s_frame + (uint32_t)slot) & 31u) == 0;
+            int full = s_tex_force_full || e->dynamic || ((s_frame + (uint32_t)slot) & 31u) == 0;
             uint32_t h;
-            h = tex_hash(t, full);
+            h = tex_hash(t, full ? 2 : 0);
             e->checked_frame = s_frame;
             if (full) {
                 if (h != e->hash_full) {
@@ -762,7 +845,7 @@ static ID3D11ShaderResourceView *tex_get(const Nv2aTexture *t)
                 e->hash = h;
                 e->dynamic = 1;
                 tex_upload(e, t);
-                e->hash_full = tex_hash(t, 1); e->hash_full_valid = 1;
+                e->hash_full = tex_hash(t, 2); e->hash_full_valid = 1;
             }
         }
         e->last_used = s_frame;
@@ -776,7 +859,7 @@ static ID3D11ShaderResourceView *tex_get(const Nv2aTexture *t)
     e->offset = t->offset; e->w = t->width; e->h = t->height;
     e->color = t->color; e->pitch = t->pitch; e->palette = t->palette;
     e->hash = tex_hash(t, 0);
-    e->hash_full = tex_hash(t, 1); e->hash_full_valid = 1;
+    e->hash_full = tex_hash(t, 2); e->hash_full_valid = 1;
     e->checked_frame = e->last_used = s_frame;
     tex_upload(e, t);
     return e->srv;
@@ -1030,8 +1113,8 @@ static void be_clear(const Nv2aSurface *s, const Nv2aRenderState *rs,
         memset(v, 0, sizeof v);
         v[0].x = x0; v[0].y = y0; v[1].x = x1; v[1].y = y0; v[2].x = x0; v[2].y = y1;
         v[3].x = x1; v[3].y = y0; v[4].x = x1; v[4].y = y1; v[5].x = x0; v[5].y = y1;
-        for (k = 0; k < 6; k++) { v[k].z = depth * s_zscale; v[k].rhw = 1.0f; }
-        qb.vertices = v; qb.count = 6; qb.texture = NULL; qb.state = &q; qb.combiner = NULL;
+        for (k = 0; k < 6; k++) { v[k].z = depth * s_zscale; v[k].rhw = 1.0f; v[k].fog = 1.0f; }
+        qb.vertices = v; qb.count = 6; qb.texture = NULL; qb.state = &q; qb.combiner = NULL; qb.fog_color = 0;
         be_draw(&qs, &qb);
     }
     if ((flags & 0x3) && t->dsv && full) {
@@ -1094,8 +1177,21 @@ static void be_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     if (b->texture) {
         Target *rt = target_find(b->texture->offset);     /* render-to-texture */
         s_st_texreq++;
+        if (rt) {   /* once per surface: what the game samples from a render target */
+            static uint32_t seen[32]; static int ns;
+            int q, f = 0;
+            for (q = 0; q < ns; q++) if (seen[q] == b->texture->offset) f = 1;
+            if (!f && ns < 32) {
+                seen[ns++] = b->texture->offset;
+                fprintf(stderr, "[D3D11] rtt source 0x%08X tex %ux%u fmt 0x%02X pitch %u, target %ux%u%s\n",
+                        b->texture->offset, b->texture->width, b->texture->height, b->texture->color,
+                        b->texture->pitch, rt->w, rt->h, rt == t ? " (self)" : "");
+            }
+        }
         if (rt && target_cpu_newer(rt, b->texture)) {
+            s_tex_force_full = 1;   /* CPU-fed surface: small edits, check it whole */
             srv = tex_get(b->texture); s_st_rtt_guest++;
+            s_tex_force_full = 0;
         }
         else if (rt && rt != t) { srv = rt->srv; s_st_rtt++; }
         else if (rt) s_st_rtt_self++;
@@ -1159,6 +1255,7 @@ static void be_draw(const Nv2aSurface *s, const Nv2aBatch *b)
             rc.fin[2] = bc->control; rc.fin[3] = bc->stage_program;
             unpack_argb(bc->final_c0, rc.fc0);
             unpack_argb(bc->final_c1, rc.fc1);
+            unpack_argb(b->fog_color, rc.fog);
             rc.on[0] = 1;
             s_st_rc++;
         }
@@ -1172,6 +1269,10 @@ static void be_draw(const Nv2aSurface *s, const Nv2aBatch *b)
             }
         }
         ID3D11DeviceContext_PSSetConstantBuffers(s_ctx, 1, 1, &s_rc_cb);
+        {
+            ID3D11PixelShader *sp = rc.on[0] ? rc_ps_for((const uint32_t (*)[4])rc.st, rc.fin) : NULL;
+            ID3D11DeviceContext_PSSetShader(s_ctx, sp ? sp : s_ps, NULL, 0);
+        }
     }
     ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, 1, &srv);
     ID3D11DeviceContext_PSSetSamplers(s_ctx, 0, 1, &samp);
