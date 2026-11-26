@@ -10,11 +10,12 @@ param(
     [string]$GuestCore = "0",   # host core for all guest threads (they must share one; see below)
     [int]$GpuIdleUs = 0,        # >0: the GPU thread sleeps this long when idle instead of spinning
     [switch]$Profile,           # sample the busiest threads; [PROFILE] lines every 10 s
+    [switch]$Clang,             # run the clang-cl build (build-clang) instead of the MSVC one
     [string]$Work  = "C:\AMRecomp\work"
 )
 
 $Repo = Split-Path -Parent $PSScriptRoot
-$exe  = Join-Path $Repo "build\Release\automodellista_recomp.exe"
+$exe  = Join-Path $Repo $(if ($Clang) { "build-clang\Release\automodellista_recomp.exe" } else { "build\Release\automodellista_recomp.exe" })
 
 if ($Watchdog -gt 0) { $env:RECOMP_WATCHDOG_SECS = "$Watchdog" }
 else { Remove-Item Env:RECOMP_WATCHDOG_SECS -ErrorAction SilentlyContinue }
@@ -25,8 +26,8 @@ if ($D3D11) {
     $env:RECOMP_STRIP_ALT_WINDING = "1"   # strips wind like hardware, so back-face culling keeps every triangle
     Remove-Item Env:RECOMP_FB_WINDOW -ErrorAction SilentlyContinue
 } else {
-    Remove-Item Env:AM_D3D11 -ErrorAction SilentlyContinue
-    Remove-Item Env:RECOMP_STRIP_ALT_WINDING -ErrorAction SilentlyContinue
+    $env:AM_D3D11 = "0"   # the .exe defaults to D3D11 when unset
+    $env:RECOMP_STRIP_ALT_WINDING = "0"   # the .exe defaults it on
     $env:RECOMP_FB_WINDOW = "1"   # CPU-rendered guest framebuffer window
 }
 $env:RECOMP_VBLANK        = "paced" # 60 Hz vblank: CRI ADX/ADXF file streaming is driven by it

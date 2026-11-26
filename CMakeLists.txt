@@ -35,6 +35,17 @@ set(XBOXRECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/xboxrecomp" CACHE PATH
 
 # Add xboxrecomp as a subdirectory -- this builds all 6 runtime libraries
 # and provides the 'xboxrecomp' umbrella target to link against.
+# Clang: keep the optimizer to MSVC's assumptions for the whole build (the
+# runtime also reads guest memory through casts). See "Clang (clang-cl)" below.
+if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    if(MSVC)
+        add_compile_options(/clang:-fno-strict-aliasing /clang:-fwrapv)
+        # Silence the CRT's "getenv/fopen is unsafe" notices (hundreds of lines).
+        add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+    else()
+        add_compile_options(-fno-strict-aliasing -fwrapv)
+    endif()
+endif()
 add_subdirectory(${XBOXRECOMP_DIR} ${CMAKE_BINARY_DIR}/xboxrecomp)
 
 # ── Recompiled game executable ──────────────────────────────────
@@ -158,6 +169,22 @@ if(MSVC)
                 COMPILE_OPTIONS "${AM_GEN_NOOPT_FLAGS}")
         endif()
     endforeach()
+endif()
+
+# ── Clang (clang-cl) ────────────────────────────────────────────
+# cmake -S . -B build-clang -G "Visual Studio 18 2026" -A x64 -T ClangCL
+# The generated code is translated x86: it reinterprets guest memory through
+# casts (MEM32 over byte arrays) and relies on two's-complement wrap-around,
+# which MSVC never optimizes against but clang does. These two flags keep
+# clang's optimizer to MSVC's assumptions; without them, clang may legally
+# "optimize" translated code into different behaviour.
+if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(${PROJECT_NAME} PRIVATE
+        # The generated code trips a few warnings by the thousand; they are
+        # noise for translated code.
+        -Wno-unused-variable -Wno-unused-label -Wno-unused-but-set-variable
+        -Wno-parentheses-equality -Wno-self-assign -Wno-unused-value)
+    message(STATUS "Clang build: -fno-strict-aliasing -fwrapv (all targets, set before the toolkit)")
 endif()
 
 # ── Profiling symbols ───────────────────────────────────────────

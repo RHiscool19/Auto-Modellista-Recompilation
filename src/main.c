@@ -41,6 +41,10 @@
 /* xboxrecomp runtime headers */
 #include <xbox/xboxrecomp.h>
 
+/* From the generated recomp_types.h (not included here). MSVC accepted the
+ * implicit declaration with a warning; clang (C99 rules) rejects it. */
+int recomp_dispatch_init(void);
+
 /*
  * If xboxrecomp.h is not an umbrella header in your setup, include
  * the individual headers directly:
@@ -88,8 +92,13 @@ extern ptrdiff_t g_xbox_mem_offset;
 #ifndef AM_GAME_DIR
 #define AM_GAME_DIR "C:/AMRecomp/Source Files/Unpacked ISO"
 #endif
-#define YOUR_GAME_XBE_PATH      AM_GAME_DIR "/default.xbe"
-#define YOUR_GAME_DIR           AM_GAME_DIR
+/* The game folder, resolved at startup (resolve_game_dir): automodellista.ini
+ * next to the .exe ([game] dir=...), else a "game" folder next to the .exe,
+ * else the compile-time AM_GAME_DIR. The companion app writes the .ini. */
+static char g_game_dir[MAX_PATH] = AM_GAME_DIR;
+static char g_game_xbe[MAX_PATH] = AM_GAME_DIR "/default.xbe";
+#define YOUR_GAME_XBE_PATH      g_game_xbe
+#define YOUR_GAME_DIR           g_game_dir
 
 /* ── Forward declarations ──────────────────────────────────── */
 
@@ -225,6 +234,156 @@ typedef struct MCPXAPUState MCPXAPUState;
 extern MCPXAPUState *mcpx_apu_init_standalone(uint8_t *ram_ptr);
 extern MCPXAPUState *g_apu_state;
 
+static int file_exists(const char *p)
+{
+    DWORD a = GetFileAttributesA(p);
+    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+/* automodellista.ini (next to the .exe), written by the companion app:
+ *   [game]
+ *   dir=D:\Games\Auto Modellista       ; folder holding default.xbe
+ *   [settings]
+ *   AM_D3D11=1                          ; any setting; the environment still wins
+ * Lines in [settings] are applied like the built-in defaults: only when the
+ * variable is not already set. */
+static void resolve_game_dir(void)
+{
+    char exe_dir[MAX_PATH], ini[MAX_PATH], cand[MAX_PATH], *slash;
+    DWORD n = GetModuleFileNameA(NULL, exe_dir, sizeof exe_dir);
+    if (!n || n >= sizeof exe_dir) return;
+    slash = strrchr(exe_dir, '\\');
+    if (!slash) return;
+    slash[0] = 0;
+
+    snprintf(ini, sizeof ini, "%s\\automodellista.ini", exe_dir);
+    if (file_exists(ini)) {
+        char dir[MAX_PATH];
+        char sect[8192], *k;
+        GetPrivateProfileStringA("game", "dir", "", dir, sizeof dir, ini);
+        if (dir[0]) {
+            snprintf(cand, sizeof cand, "%s\\default.xbe", dir);
+            if (file_exists(cand)) {
+                snprintf(g_game_dir, sizeof g_game_dir, "%s", dir);
+                snprintf(g_game_xbe, sizeof g_game_xbe, "%s", cand);
+            } else
+                fprintf(stderr, "[CONFIG] %s: no default.xbe in [game] dir=%s\n", ini, dir);
+        }
+        /* [settings]: KEY=VALUE pairs, as defaults. */
+        if (GetPrivateProfileSectionA("settings", sect, sizeof sect, ini)) {
+            for (k = sect; *k; k += strlen(k) + 1) {
+                char *eq = strchr(k, '=');
+                if (!eq || k[0] == ';') continue;
+                *eq = 0;
+                if (!getenv(k)) _putenv_s(k, eq + 1);
+                *eq = '=';
+            }
+        }
+        if (g_game_xbe[0] && file_exists(g_game_xbe)) {
+            fprintf(stderr, "[CONFIG] game folder: %s (from %s)\n", g_game_dir, ini);
+            return;
+        }
+    }
+    /* A "game" folder next to the .exe (what the companion app's install makes). */
+    snprintf(cand, sizeof cand, "%s\\game\\default.xbe", exe_dir);
+    if (file_exists(cand)) {
+        snprintf(g_game_dir, sizeof g_game_dir, "%s\\game", exe_dir);
+        snprintf(g_game_xbe, sizeof g_game_xbe, "%s", cand);
+    }
+    fprintf(stderr, "[CONFIG] game folder: %s\n", g_game_dir);
+}
+
+/* Where saves live: [game] saves=... in automodellista.ini (e.g. a "saves"
+ * folder next to the .exe, for a portable setup), else
+ * %LOCALAPPDATA%\\AutoModellistaRecomp. Rebuilding the .exe or updating the
+ * companion app never touches it. Saves made before this went to the
+ * toolkit's generic %LOCALAPPDATA%\\xboxrecomp, which every xboxrecomp port
+ * shares; the first launch moves that folder here if this one doesn't exist. */
+static char g_save_dir[MAX_PATH];
+
+static const char *resolve_save_dir(void)
+{
+    char base[MAX_PATH], old_dir[MAX_PATH], ini[MAX_PATH], *slash;
+    DWORD n;
+
+    n = GetModuleFileNameA(NULL, ini, sizeof ini);
+    if (n && n < sizeof ini && (slash = strrchr(ini, '\\')) != NULL) {
+        strcpy(slash + 1, "automodellista.ini");
+        GetPrivateProfileStringA("game", "saves", "", g_save_dir, sizeof g_save_dir, ini);
+        if (g_save_dir[0]) {
+            /* Relative paths are relative to the .exe's folder. */
+            if (!(g_save_dir[0] && g_save_dir[1] == ':') && g_save_dir[0] != '\\') {
+                char rel[MAX_PATH];
+                snprintf(rel, sizeof rel, "%s", g_save_dir);
+                slash[1] = 0;
+                snprintf(g_save_dir, sizeof g_save_dir, "%s%s", ini, rel);
+            }
+            CreateDirectoryA(g_save_dir, NULL);
+            fprintf(stderr, "[CONFIG] saves: %s (from automodellista.ini)\n", g_save_dir);
+            return g_save_dir;
+        }
+    }
+    n = GetEnvironmentVariableA("LOCALAPPDATA", base, sizeof base);
+    if (!n || n >= sizeof base) return NULL;                 /* toolkit default */
+    snprintf(g_save_dir, sizeof g_save_dir, "%s\\AutoModellistaRecomp", base);
+    snprintf(old_dir, sizeof old_dir, "%s\\xboxrecomp", base);
+    if (GetFileAttributesA(g_save_dir) == INVALID_FILE_ATTRIBUTES
+            && GetFileAttributesA(old_dir) != INVALID_FILE_ATTRIBUTES) {
+        if (MoveFileExA(old_dir, g_save_dir, 0))
+            fprintf(stderr, "[CONFIG] moved existing saves %s -> %s\n", old_dir, g_save_dir);
+        else
+            fprintf(stderr, "[CONFIG] could not move %s (error %lu); new saves go to %s\n",
+                    old_dir, (unsigned long)GetLastError(), g_save_dir);
+    }
+    CreateDirectoryA(g_save_dir, NULL);
+    fprintf(stderr, "[CONFIG] saves: %s\n", g_save_dir);
+    return g_save_dir;
+}
+
+/* Settings the game needs to play, applied when the variable is not already
+ * set -- so the .exe works on a double-click, and scripts/run.ps1 (or the
+ * user) still overrides any of them. Same values run.ps1 -D3D11 uses. The
+ * CPU renderer is chosen with AM_D3D11=0 (run.ps1 without -D3D11 does that). */
+static void apply_default_settings(void)
+{
+    static const char *const defaults[][2] = {
+        { "AM_D3D11",                  "1" },      /* GPU renderer (src/d3d11_backend.c) */
+        { "RECOMP_STRIP_ALT_WINDING",  "1" },      /* hardware strip winding: culling keeps every triangle */
+        { "RECOMP_AC97_READY",         "1" },      /* else DirectSoundCreate fails */
+        { "RECOMP_VBLANK",             "paced" },  /* 60 Hz vblank; CRI streaming is driven by it */
+        { "RECOMP_PB_EXEC",            "1" },      /* execute the GPU pushbuffer */
+        { "RECOMP_TITLE_KEVENTS",      "1" },      /* CRI's own KEVENTs */
+        { "RECOMP_USB",                "1" },      /* the game's XDK input drives modelled USB, fed by XInput */
+        { "RECOMP_CONTIG_AVOID_IMAGE", "1" },      /* GPU/USB memory above the game image */
+        { "RECOMP_HEAP_RECLAIM",       "1" },      /* else a second race exhausts the GPU pool */
+        { "RECOMP_AUDIO_BUF_SAMPLES",  "1024" },
+        { "RECOMP_AUDIO_BUF_COUNT",    "6" },
+        { "RECOMP_GUEST_CPUS",         "0" },      /* all guest threads on one core (CRI needs it) */
+    };
+    size_t i;
+    for (i = 0; i < sizeof defaults / sizeof defaults[0]; i++)
+        if (!getenv(defaults[i][0]))
+            _putenv_s(defaults[i][0], defaults[i][1]);
+}
+
+/* Started without redirected output (a double-click): write the log next to
+ * the .exe, so a bug report can include it. */
+static void log_to_file_if_no_console(void)
+{
+    HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
+    if (h == NULL || h == INVALID_HANDLE_VALUE || GetFileType(h) == FILE_TYPE_UNKNOWN) {
+        char path[MAX_PATH], *slash;
+        DWORD n = GetModuleFileNameA(NULL, path, sizeof path);
+        if (!n || n >= sizeof path) return;
+        slash = strrchr(path, '\\');
+        if (!slash) return;
+        strcpy(slash + 1, "automodellista.log");
+        freopen(path, "w", stderr);
+        strcpy(slash + 1, "automodellista_out.log");
+        freopen(path, "w", stdout);
+    }
+}
+
 static DWORD WINAPI log_flusher(LPVOID unused)
 {
     (void)unused;
@@ -315,6 +474,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     (void)lpCmdLine;
     (void)nCmdShow;
 
+    log_to_file_if_no_console();
+
     /* Buffered log output, flushed every 250 ms by a small thread (and by the
      * crash handler). Unbuffered, every log line was its own WriteFile, and
      * the profiler found the GPU thread spending ~23% of its time in
@@ -331,6 +492,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
             CloseHandle(CreateThread(NULL, 0, log_flusher, NULL, 0, NULL));
         }
     }
+
+    resolve_game_dir();          /* also applies automodellista.ini [settings] */
+    apply_default_settings();
 
     printf("=== Auto Modellista - Static Recompilation ===\n");
     printf("Loading XBE...\n");
@@ -350,7 +514,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Step 1: Load XBE */
     if (!load_xbe(YOUR_GAME_XBE_PATH, &xbe_data, &xbe_size)) {
         MessageBoxA(NULL, "Failed to load default.xbe.\n"
-                    "Place the game files in the 'game' subdirectory.",
+                    "Run the companion app, or put the game files in a 'game' folder\n"
+                    "next to this .exe, or set [game] dir= in automodellista.ini.",
                     "Recomp", MB_ICONERROR);
         return 1;
     }
@@ -415,7 +580,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Step 4: Set game directory for file I/O path translation */
     {
         extern void xbox_path_init(const char *game_dir, const char *save_dir);
-        xbox_path_init(YOUR_GAME_DIR, NULL);
+        xbox_path_init(YOUR_GAME_DIR, resolve_save_dir());
     }
 
     /* Step 5: Initialize kernel bridge (thunk table in Xbox memory) */

@@ -287,6 +287,31 @@ Order: (a) clang/llvm-mingw build of the project, (b) config.ini + first-run gam
 compile-time AM_GAME_DIR), (c) GUI wrapper for verify/extract/generate/build. Later: remapping, texture packs,
 resolution scale, button-prompt style in the same app.
 
+### Beta scope (decided 2026-11-25): companion app ships IN the beta
+Release flow: every update ships ONLY a new companion app (tools, prebuilt runtime, our code/config, llvm-mingw).
+User points it at the ISO/folder + an output folder -> Build. game\ is extracted once (skipped if a valid one is
+there); later updates just rebuild the .exe; automodellista.ini is kept. The app can be deleted after building.
+Saves: %LOCALAPPDATA%\AutoModellistaRecomp (own folder; was the toolkit's shared %LOCALAPPDATA%\xboxrecomp, moved
+over on first launch), or [game] saves=... in the ini (relative = next to the .exe) for a portable setup.
+Input: full ISO (Redump, game partition at 0x18300000), XISO, or an unpacked folder. Output: a folder with the
+.exe, a game\ folder (extracted files) and automodellista.ini. Nothing game-derived is distributed: the app
+generates and compiles the code on the user's machine.
+Status:
+- [x] .exe runs on a double-click: built-in defaults (apply_default_settings), log to automodellista.log
+- [x] game folder at runtime: automodellista.ini [game] dir=..., else .\game\, else compile-time AM_GAME_DIR;
+      [settings] KEY=VALUE lines applied as defaults
+- [x] clang-cl build (build-clang) compiles and runs. Open: double-click clang run had dips + a single-sound hang;
+      A/B with run.ps1 -Clang pending
+- [ ] llvm-mingw build (the redistributable toolchain the app ships)
+- [ ] runtime + D3D11 back end as a prebuilt static library (built with llvm-mingw)
+- [ ] app (Python + tkinter, PyInstaller with capstone + xboxrecomp tools): pick ISO/folder -> verify SHA-1 ->
+      extract (own XDVDFS reader) -> regen -> compile generated C -> link -> write folder + ini
+- Deferred to after the beta (2026-11-26): single-sound audio hang. Rare and random (one sound loops while music and
+  engine play on; seen with only 1 underrun, so not only starvation). Known issue in the beta notes. Next step then:
+  always-on, cheap voice on/off logging so any run that hits it records which voice and its last command.
+  Clue (2026-11-26): seen in runs with the Honda NSX (twice), not with the Corvette or the Supra runs that were
+  clean -> maybe one car's sound (an engine layer / turbo / VTEC loop). Repro: NSX, a race, pause-quit, repeat.
+
 ## Idea (post-beta): original 2002 handling
 Xbox (and GameCube, JP and US) are all "US Tuned": Capcom reworked handling after the 2002 PS2 release. Only the
 original PS2 (JP/EU 2002) has the old model. Possible option "Original (2002) handling":

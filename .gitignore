@@ -21,6 +21,7 @@ abi_functions.json
 
 # Build
 build/
+build-*/
 out/
 .vs/
 *.exe
