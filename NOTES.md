@@ -174,12 +174,23 @@ Done since v0.2.0 (2026-11-25 night):
 - ~~2-second hitch + most audio underruns~~: the kernel's 2 s summary print (now RECOMP_KERNEL_SUMMARY=1 only).
   Underruns 80-120 -> 2-3 per session
 
+## RACES AT 60 FPS (2026-11-25, 23:14)
+Sampling profiler (src/am_profiler.c, run.ps1 -Profile) showed the game's main thread at 62% in sub_00209360
+(XDK D3D spinning for the GPU) + 34% vblank wait: game logic < 5%. The GPU executor thread spent ~23% in
+NtWriteFile (unbuffered stderr, a "[GPU] draw #" line every 200 draws) + ~12% QueryPerformanceCounter (the
+XF-TIME meters) + locks. Fix: stderr fully buffered (1 MB, flushed every 250 ms by a thread; crash handler
+flushes; RECOMP_LOG_UNBUFFERED=1 for the old way), draw-progress line off (RECOMP_GPU_DRAW_LOG=1), meters only
+with RECOMP_XF_TIME=1. Result: races 55-60 fps (10 s averages 56-60), 0 audio underruns, boot ~instant instead
+of ~30 s. Remaining: one dip to ~40 during the pre-race camera pan when cars load (~100 texture uploads in 5 s,
+122 ms of decode on the GPU thread) -> decode textures off-thread or warm the cache during the loading screen.
+Lesson: logging on hot threads was the biggest single cost in the port.
+
 ## Milestone: first BETA
 Ship when **arcade mode is playable without stutters**. The beta also brings the clang build and the companion
 app (verify + build). After the beta: test garage life (expect more unrecompiled indirect-call targets there).
 
 Open, in order:
-1. **recomp_0012.c at /O1** (suspected CRI audio decoder, still /Od): `-DAM_GEN_NOOPT_FLAGS="/O1;/Ob0"`; time the build
+1. ~~recomp_0012.c at /O1~~: builds in < 5 min; no visible fps change (it wasn't the bottleneck). Kept as an option
 2. **APU MMIO without exceptions**: ~20,000 traps/s in races (100k per 5 s), est. 10-20% of a core
 3. **GPU vertex programs**: races 28-57 fps, dips in busy sections; vertex work is all on the CPU
 4. **cli/sti as real interrupt masking**: XPP (USB driver) guards its lists with cli/sti, emitted as no-ops; the
@@ -188,6 +199,15 @@ Open, in order:
    start/stop to find the stop that never arrives
 6. Clang build (llvm-mingw / clang-cl; also the Switch toolchain) + companion app
 7. Later: honest sub_00209540, Switch branch
+
+Black flashes (2 at ~40 s into a Suzuka race, 0 "empty flips held"): not an empty flip. Present picked "the last
+640x480 surface drawn", and races also draw a 640x480 off-screen surface (0x822E0000, sampled back once a frame).
+Fix: a surface ever sampled as a texture is off-screen and never presented. Retest across several races.
+
+Frame-rate findings (2026-11-25 night): races sit at 57 or ~29 fps = vsync halving (a frame over 16.7 ms waits a
+second vblank). [THREAD-CPU]: GPU executor thread 92-98% even in menus (nv2a_ack_thread spins with Sleep(0));
+game main thread 60-83% in races. Experiments: run.ps1 -GpuIdleUs 250 (timer wait when PUT is idle),
+-GuestCore 2 (guest threads off core 0). Executor work itself ~20% of wall in races (vertex programs 11-16%).
 
 ## D3D11 back end v1 (src/d3d11_backend.c)
 - Opt-in: `.\scripts\run.ps1 -D3D11` (sets AM_D3D11=1, turns off RECOMP_FB_WINDOW; main.c registers it before the game starts)
@@ -251,6 +271,16 @@ Costs: first build ~5-20 min, ~0.5 GB download, support for failed builds (clear
 Order: (a) clang/llvm-mingw build of the project, (b) config.ini + first-run game-folder setup in the exe (replaces the
 compile-time AM_GAME_DIR), (c) GUI wrapper for verify/extract/generate/build. Later: remapping, texture packs,
 resolution scale, button-prompt style in the same app.
+
+## Idea (post-beta): original 2002 handling
+Xbox (and GameCube, JP and US) are all "US Tuned": Capcom reworked handling after the 2002 PS2 release. Only the
+original PS2 (JP/EU 2002) has the old model. Possible option "Original (2002) handling":
+- If it is mostly per-car numbers (grip, steering, weight transfer): diff the car data files PS2-original vs Xbox,
+  swap the tables in at load. CPU differences don't matter for data.
+- If the physics code changed: reimplement the differences as native overrides (like am_overrides.c's sqrt).
+  The PS2 code is MIPS, so it can't be dropped in.
+First step: compare car data files between a PS2 original disc and our Xbox files. Reference: "Auto Modellista:
+Original vs US Tuned" comparison video (cited on Wikipedia).
 
 ## Plan: button prompts (texture replacement)
 - The original Xbox pad has White and Black buttons; modern pads use LB/RB in their place. Replace the White/Black

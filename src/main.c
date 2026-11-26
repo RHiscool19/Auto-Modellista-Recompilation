@@ -225,6 +225,17 @@ typedef struct MCPXAPUState MCPXAPUState;
 extern MCPXAPUState *mcpx_apu_init_standalone(uint8_t *ram_ptr);
 extern MCPXAPUState *g_apu_state;
 
+static DWORD WINAPI log_flusher(LPVOID unused)
+{
+    (void)unused;
+    for (;;) {
+        Sleep(250);
+        fflush(stderr);
+        fflush(stdout);
+    }
+    return 0;
+}
+
 static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
 {
     if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
@@ -304,9 +315,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     (void)lpCmdLine;
     (void)nCmdShow;
 
-    /* Unbuffered output for immediate visibility during debugging */
-    setvbuf(stdout, NULL, _IONBF, 0);
-    setvbuf(stderr, NULL, _IONBF, 0);
+    /* Buffered log output, flushed every 250 ms by a small thread (and by the
+     * crash handler). Unbuffered, every log line was its own WriteFile, and
+     * the profiler found the GPU thread spending ~23% of its time in
+     * NtWriteFile -- time the game's thread spent spinning in D3D waiting
+     * for it. RECOMP_LOG_UNBUFFERED=1 restores the old behaviour. */
+    {
+        const char *ub = getenv("RECOMP_LOG_UNBUFFERED");
+        if (ub && ub[0] == '1') {
+            setvbuf(stdout, NULL, _IONBF, 0);
+            setvbuf(stderr, NULL, _IONBF, 0);
+        } else {
+            setvbuf(stdout, NULL, _IOFBF, 1 << 16);
+            setvbuf(stderr, NULL, _IOFBF, 1 << 20);
+            CloseHandle(CreateThread(NULL, 0, log_flusher, NULL, 0, NULL));
+        }
+    }
 
     printf("=== Auto Modellista - Static Recompilation ===\n");
     printf("Loading XBE...\n");
@@ -318,6 +342,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME);
     SymInitialize(GetCurrentProcess(), NULL, TRUE);
     AddVectoredExceptionHandler(1, veh_handler);
+    {
+        extern void am_profiler_start(void);   /* RECOMP_PROFILE=1 (am_profiler.c) */
+        am_profiler_start();
+    }
 
     /* Step 1: Load XBE */
     if (!load_xbe(YOUR_GAME_XBE_PATH, &xbe_data, &xbe_size)) {

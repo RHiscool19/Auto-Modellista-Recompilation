@@ -473,12 +473,14 @@ typedef struct {
     uint32_t gpu_frame, cpu_frame, guest_hash, hash_frame;
     int      hash_init;
     uint32_t draws_since_flip;    /* 0 at a flip: cleared but never drawn -> don't show it */
+    int      sampled;             /* ever read back as a texture: off-screen, never presented */
 } Target;
 
 #define MAX_TARGETS 32
 static Target   s_targets[MAX_TARGETS];
 static Target  *s_bound;           /* currently bound as render target */
 static Target  *s_present;         /* the surface to show at flip */
+static Target  *s_last_onscreen;   /* the last flip-buffer candidate (never an off-screen one) */
 /* Per-interval counters, printed every ~5 s (RECOMP_D3D11_STATS=0 silences). */
 static unsigned s_st_held;
 static unsigned s_st_uploads, s_st_evicts;     /* texture decodes / cache evictions */
@@ -549,6 +551,38 @@ static int target_alloc(Target *t, uint32_t w, uint32_t h)
     return 1;
 }
 
+/* Snapshot of a target for a draw that samples its own render target. */
+static ID3D11Texture2D          *s_selfcp_tex;
+static ID3D11ShaderResourceView *s_selfcp_srv;
+static uint32_t                  s_selfcp_w, s_selfcp_h;
+
+static ID3D11ShaderResourceView *self_copy(Target *t)
+{
+    if (!s_selfcp_tex || s_selfcp_w != t->w || s_selfcp_h != t->h) {   /* same size: UVs line up */
+        D3D11_TEXTURE2D_DESC td;
+        if (s_selfcp_srv) { ID3D11ShaderResourceView_Release(s_selfcp_srv); s_selfcp_srv = NULL; }
+        if (s_selfcp_tex) { ID3D11Texture2D_Release(s_selfcp_tex); s_selfcp_tex = NULL; }
+        memset(&td, 0, sizeof td);
+        td.Width = t->w; td.Height = t->h;
+        td.MipLevels = 1; td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &s_selfcp_tex))) return NULL;
+        ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)s_selfcp_tex, NULL, &s_selfcp_srv);
+        s_selfcp_w = t->w; s_selfcp_h = t->h;
+    }
+    {
+        D3D11_BOX box;
+        box.left = 0; box.top = 0; box.front = 0;
+        box.right = t->w; box.bottom = t->h; box.back = 1;
+        ID3D11DeviceContext_CopySubresourceRegion(s_ctx, (ID3D11Resource *)s_selfcp_tex, 0, 0, 0, 0,
+                                                  (ID3D11Resource *)t->tex, 0, &box);
+    }
+    return s_selfcp_srv;
+}
+
 /* One target per guest colour address. Its size only grows: the surface
  * size the executor reports is the clip rectangle, which a title narrows to
  * draw a panel or a sprite, and recreating the target there wiped everything
@@ -593,6 +627,7 @@ static Target *target_get(const Nv2aSurface *s)
     t = &s_targets[victim];
     if (t == s_bound) { ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 0, NULL, NULL); s_bound = NULL; }
     if (t == s_present) s_present = NULL;
+    if (t == s_last_onscreen) s_last_onscreen = NULL;
     target_free(t);
     if (!target_alloc(t, want_w, want_h)) { memset(t, 0, sizeof *t); return NULL; }
     t->color_va = s->color_va;
@@ -613,10 +648,30 @@ static void bind_target(Target *t)
 
 /* The main frame buffer: the most recently used target at least 512 wide
  * (smaller ones are shadow maps, reflections and the like). */
+/* Off-screen surfaces are never shown. The rule was "the last 640x480
+ * surface drawn", but in races the game also renders a 640x480 off-screen
+ * surface (0x822E0000) and samples it back as a texture once a frame for an
+ * effect. When it happened to be drawn last before a flip, it was presented:
+ * the occasional black or half-black frame. A surface the game has ever
+ * sampled as a texture is off-screen; the two flip buffers never are.
+ * (PCRTC_START can't tell them apart here: XDK D3D never writes it after
+ * AvSetDisplayMode.) */
 static void note_present_candidate(Target *t, const Nv2aSurface *s)
 {
-    if (t->w / (s->aa_sx ? s->aa_sx : 1) >= 512)
-        s_present = t;
+    if (t->w / (s->aa_sx ? s->aa_sx : 1) < 512) return;
+    if (t->sampled) {
+        static uint32_t told[8]; static int nt;
+        int i, seen = 0;
+        for (i = 0; i < nt; i++) if (told[i] == t->color_va) seen = 1;
+        if (!seen && nt < 8) {
+            told[nt++] = t->color_va;
+            fprintf(stderr, "[D3D11] not presenting 0x%08X: sampled as a texture (off-screen surface)\n",
+                    t->color_va);
+        }
+        return;
+    }
+    s_present = t;
+    s_last_onscreen = t;
 }
 
 /* ---- Depth scale ------------------------------------------------------- */
@@ -1177,6 +1232,10 @@ static void be_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     if (b->texture) {
         Target *rt = target_find(b->texture->offset);     /* render-to-texture */
         s_st_texreq++;
+        if (rt && !rt->sampled) {
+            rt->sampled = 1;
+            if (s_present == rt) s_present = s_last_onscreen;   /* back to the flip buffer */
+        }
         if (rt) {   /* once per surface: what the game samples from a render target */
             static uint32_t seen[32]; static int ns;
             int q, f = 0;
@@ -1194,7 +1253,14 @@ static void be_draw(const Nv2aSurface *s, const Nv2aBatch *b)
             s_tex_force_full = 0;
         }
         else if (rt && rt != t) { srv = rt->srv; s_st_rtt++; }
-        else if (rt) s_st_rtt_self++;
+        else if (rt) {
+            /* The draw reads the surface it is drawing into (a menu effect
+             * that shrinks the screen into a corner, or feedback). D3D11
+             * can't bind one texture as both, so the draw went untextured:
+             * a flicker in that corner. Read from a snapshot instead. */
+            srv = self_copy(rt);
+            s_st_rtt_self++;
+        }
         else srv = tex_get(b->texture);
         if (srv) s_st_texok++;
         if (srv) {

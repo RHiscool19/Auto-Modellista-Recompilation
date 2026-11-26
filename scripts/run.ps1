@@ -7,6 +7,9 @@
 param(
     [int]$Watchdog = 0,
     [switch]$D3D11,
+    [string]$GuestCore = "0",   # host core for all guest threads (they must share one; see below)
+    [int]$GpuIdleUs = 0,        # >0: the GPU thread sleeps this long when idle instead of spinning
+    [switch]$Profile,           # sample the busiest threads; [PROFILE] lines every 10 s
     [string]$Work  = "C:\AMRecomp\work"
 )
 
@@ -40,7 +43,10 @@ $env:RECOMP_CONTIG_AVOID_IMAGE = "1"
 $env:RECOMP_HEAP_RECLAIM  = "1"   # reuse freed heap/contiguous memory; without it a second race exhausts the 64 MB GPU pool and crashes
 $env:RECOMP_AUDIO_BUF_SAMPLES = "1024" # 6 x 1024 samples = 128 ms of audio queued: rides out the 20-80 ms gaps
 $env:RECOMP_AUDIO_BUF_COUNT   = "6"    # in the APU thread that underran the default 43 ms (menu stutter)
-$env:RECOMP_GUEST_CPUS    = "0"   # all guest threads on one core, like the Xbox (CRI's suspend/resume scheduling needs it)
+$env:RECOMP_GUEST_CPUS    = $GuestCore   # all guest threads on one core, like the Xbox (CRI's suspend/resume scheduling needs it)
+if ($Profile) { $env:RECOMP_PROFILE = "1"; $env:RECOMP_XF_TIME = "1" } else { Remove-Item Env:RECOMP_PROFILE, Env:RECOMP_XF_TIME -ErrorAction SilentlyContinue }
+if ($GpuIdleUs -gt 0) { $env:RECOMP_GPU_IDLE_US = "$GpuIdleUs" }
+else { Remove-Item Env:RECOMP_GPU_IDLE_US -ErrorAction SilentlyContinue }
 # RECOMP_GUEST_LOCK=1 deadlocked at CRI's thread creation (main holds the lock
 # while the new thread needs it to start), so make sure it is off:
 Remove-Item Env:RECOMP_GUEST_LOCK -ErrorAction SilentlyContinue

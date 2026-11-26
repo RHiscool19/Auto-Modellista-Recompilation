@@ -182,9 +182,52 @@ void recomp_icall_not_code_log(uint32_t va)
  * cause rather than wherever the damage surfaces. */
 #include <stdlib.h>
 
+/* cli / sti as real interrupt masking.
+ *
+ * The XPP (USB peripheral) driver guards its transfer lists with cli/sti
+ * (e.g. 0x002B9DB2 / 0x002B9DC3). The translator emits both as RECOMP_UNIMPL
+ * no-ops, so the OHCI model's interrupt thread could run the driver's ISR in
+ * the middle of a list edit: the occasional startup crash in sub_002B9F67
+ * (list walk reading 0x7FFFFFxx, DPC thread esp 0x00A3FF5C) and the startup
+ * hang with 0 flips. cli now raises this thread to HIGH_LEVEL the way the
+ * runtime brackets a host-run ISR (no DPC drain, unlike KfRaiseIrql); device
+ * models hold their interrupts off while any thread is raised. sti puts the
+ * level back. Nesting is tracked per thread. */
+extern int  xbox_IrqlEnterInterrupt(int level);
+extern void xbox_IrqlLeaveInterrupt(int saved);
+extern int  xbox_IrqlCurrent(void);
+#if defined(_MSC_VER)
+#define AM_TLS __declspec(thread)
+#else
+#define AM_TLS __thread
+#endif
+#define AM_HIGH_LEVEL 31
+static AM_TLS int t_cli_depth;
+static AM_TLS int t_cli_saved[8];
+static AM_TLS int t_cli_raised[8];
+
+static void am_cli(void)
+{
+    int d = t_cli_depth++;
+    if (d >= 8) return;                      /* absurd nesting: just count */
+    t_cli_raised[d] = xbox_IrqlCurrent() < AM_HIGH_LEVEL;
+    t_cli_saved[d] = t_cli_raised[d] ? xbox_IrqlEnterInterrupt(AM_HIGH_LEVEL) : 0;
+}
+
+static void am_sti(void)
+{
+    int d;
+    if (t_cli_depth == 0) return;            /* sti without cli: interrupts already on */
+    d = --t_cli_depth;
+    if (d >= 8) return;
+    if (t_cli_raised[d]) xbox_IrqlLeaveInterrupt(t_cli_saved[d]);
+}
+
 void recomp_unimpl(const char *text, uint32_t va)
 {
     static int printed;
+    if (text[0] == 'c' && text[1] == 'l' && text[2] == 'i' && !text[3]) { am_cli(); return; }
+    if (text[0] == 's' && text[1] == 't' && text[2] == 'i' && !text[3]) { am_sti(); return; }
     const char *trap = getenv("RECOMP_UNIMPL_TRAP");
     int stop = trap && *trap && *trap != '0';
 
