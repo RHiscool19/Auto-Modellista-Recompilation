@@ -302,6 +302,9 @@ Status:
       [settings] KEY=VALUE lines applied as defaults
 - [x] clang-cl build (build-clang) compiles and runs. Open: double-click clang run had dips + a single-sound hang;
       A/B with run.ps1 -Clang pending
+- [ ] precompile the per-program combiner pixel shaders at startup (or cache to disk): first use mid-race costs
+      tens of ms in D3DCompile -> the one ~49 fps 10 s window at race start
+- [x] toolkit fork: RHiscool19/xboxrecomp, branch automodellista (11dfafe); patches/ kept one release
 - [ ] llvm-mingw build (the redistributable toolchain the app ships)
 - [ ] runtime + D3D11 back end as a prebuilt static library (built with llvm-mingw)
 - [ ] app (Python + tkinter, PyInstaller with capstone + xboxrecomp tools): pick ISO/folder -> verify SHA-1 ->
