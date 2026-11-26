@@ -159,20 +159,19 @@ Done (D3D11 renderer, 2026-11-25):
 - ~~Striped save/load dialog background~~: correct on -D3D11
 - ~~Black / flickering cars~~: correct colours on -D3D11 (CPU renderer still shows it)
 
-Open, in order:
-1. **Race performance (~3 fps; pre-race pan of the same track is 30-60 fps).** Profile (VS CPU Usage, D3D11, racing):
-   ~1 core busy, ~80% of samples in kernel (ntdll/kernelbase), little in game code; some symbols mislabeled.
-   Suspects being tested:
-   - ICALL to unrecompiled 0x001F2395 failing millions of times in races (each prints ~22 log lines) -> seeded, needs full regen + test
-   - APU registers trapped via PAGE_NOACCESS: every access is an exception. `[MMIO-FAULTS]` counter added (5 s rate).
-     If high in races: route APU register access without faults (poll/diff like the NV2A registers, or a cheaper hook)
-   - Then re-profile; next candidates are GPU vertex programs and the KickOff spin (sub_00209360, 6% self)
-2. **Missing letters in menu description text.** Fix written, untested: partial depth/stencil clears are now drawn as a
-   depth-only quad over CLEAR_RECT (they were skipped, leaving stale depth in the text box)
-3. **ESRB fade**: centre panel and grey border fade at different times on D3D11. Compare with the CPU renderer; may be authentic
-4. **Release v0.2.0-alpha** once 1-2 are tested (notes drafted in chat; README already describes the D3D11 state)
-5. Later: register combiners / texture stages 1-3 in the back end (cel-shading look), GPU vertex programs, honest
-   sub_00209540 fence wait, USB ISR startup race, Switch port branch
+Open, in order (2026-11-25 evening):
+1. **Osaka hi.way < 1 fps**: ICALL to unrecompiled 0x000E02A0 (5,130 failures). Seeded -> full regen + test.
+2. **Glyphs**: description text fixed by whole-texture hashing; loading-screen glyphs still missing and menus fell
+   60 -> 40 fps from hashing every texture whole every frame. Now: textures that change after creation are marked
+   dynamic and re-hashed (whole) on every draw (one text texture reused for several strings per frame); others sparse
+   per frame + whole every 32 frames, staggered.
+3. **Audio hangs after a race / quit**: a voice keeps looping (one sound, then another; on exit a buzz + beeping).
+   Also menu stutter remains (APU thread gaps up to 90 ms even with the 128 ms buffer).
+4. **Combiners**: 6 programs in the whole game; 5 run. The 6th is fog (final 130C0300 = mix(fog, r0, fog.a)) -> pass
+   fog colour + per-vertex fog factor next. Pause menu correct.
+5. Race 15-35 fps (Suzuka/US speedway). Full single race + results + replay work.
+6. Release v0.2.0-alpha after 1-2 test.
+7. Later: GPU vertex programs, APU MMIO without exceptions, honest sub_00209540, USB ISR race, Switch branch
 
 ## D3D11 back end v1 (src/d3d11_backend.c)
 - Opt-in: `.\scripts\run.ps1 -D3D11` (sets AM_D3D11=1, turns off RECOMP_FB_WINDOW; main.c registers it before the game starts)
@@ -181,7 +180,10 @@ Open, in order:
 - Culling per triangle on the CPU from projected positions; rasteriser cull off
 - Blend / alpha test (in PS) / depth / stencil / colour mask mapped from NV2A GL enums
 - Textures: nv2a_backend_decode_texture, cached by (offset,size,format,pitch), re-hashed sparsely once per frame; render-to-texture uses the GPU copy
-- Missing in v1: register combiners and texture stages 1-3 (no cel shading), mip levels, vertex programs still on the CPU, nothing written back to guest memory
+- Missing in v1: texture stages 1-3, specular (v1) and fog into the combiners, mip levels, vertex programs still on the CPU, nothing written back to guest memory
+- Combiners (2026-11-25): Nv2aBatch.combiner carries the program; ps_main runs an HLSL port of nv2a_rc_eval (cbuffer RC, b1)
+  with v0 + t0 + factors; v1/fog/t1-t3 read as 0 / (0,0,0,1). AM_D3D11_COMBINERS=0 falls back to texture x diffuse.
+  CPU reference for the pause menu: opaque lavender band, black/white rules, black square + underline on the selection.
 
 ## Post-transform vertex cache (menu speed, step 1)
 - nv2a_vsh_interp already decodes each program once per upload (vsh_run_decoded);

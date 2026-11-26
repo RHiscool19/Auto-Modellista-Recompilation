@@ -8,21 +8,22 @@ The game's x86 code is translated ahead of time into C and compiled with MSVC. T
 
 ## Status
 
-Alpha. The game boots, runs its menus at full speed on the GPU renderer and starts a race, but races are still very slow. A full race has not been completed yet.
+Alpha. On the GPU renderer the game boots, runs its menus at full speed and races at 15–30 fps (sometimes 60). A full race has not been completed yet.
 
 There are two renderers. The **D3D11 renderer** (`run.ps1 -D3D11`) draws on the GPU and is the one to use. The original **CPU renderer** (the default) is kept as a reference and is much slower.
 
 | Area | D3D11 renderer | CPU renderer |
 |---|---|---|
-| Boot, ESRB / logos / intro movie | ✅ (ESRB panel and border fade separately) | ✅ |
+| Boot, ESRB / logos / intro movie | ✅ | ✅ |
 | Title screen, menus, save create / load | ✅ ~60 fps | ✅ 10–15 fps |
 | Arcade → single race → car select (3D car preview) | ✅ | ✅ |
 | Textures, transparency, sky | ✅ | ⚠️ alpha-tested scenery dithered, striped dialog background |
 | Car shading | ✅ correct colours | ❌ black / flickering |
-| In race (Suzuka tested) | ⚠️ renders correctly, ~3 fps | ⚠️ 2–3 fps |
+| In race (Suzuka tested) | ✅ 15–30 fps | ⚠️ slow |
+| Pause menu | ⚠️ very faint, selected option not highlighted | ? |
 | Menu description text | ⚠️ some letters missing | ✅ |
 | Controller (XInput pads via the emulated USB controller), rumble | ✅ | ✅ |
-| Audio (music, sound effects) | ✅ with stutter | ✅ with stutter |
+| Audio (music, sound effects) | ✅ (stutter fix being tested) | ✅ |
 
 See [`NOTES.md`](NOTES.md) for the detailed bring-up log: XBE facts, addresses, every fix and why.
 
@@ -131,6 +132,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run.ps1 -D3D11
 | `RECOMP_FB_WINDOW=1` | Without `-D3D11`: shows the CPU-rendered frame buffer in a window |
 | `RECOMP_USB=1` | The game's own input library talks to the Xbox USB controller; this emulates it and feeds it XInput pads |
 | `RECOMP_CONTIG_AVOID_IMAGE=1` | Keeps GPU/USB memory clear of the game image's address range, which the USB model depends on |
+| `RECOMP_HEAP_RECLAIM=1` | Reuses memory the game frees. Without it, textures from the first race are never given back and loading a second race crashes |
+| `RECOMP_AUDIO_BUF_SAMPLES=1024`, `RECOMP_AUDIO_BUF_COUNT=6` | A bigger audio buffer (128 ms instead of 43 ms) so short hiccups in the emulated audio chip don't stutter |
 
 `.\scripts\run.ps1 -Watchdog 120` kills the game after 120 seconds and dumps the guest call stack, which is useful for diagnosing hangs.
 
@@ -153,9 +156,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run.ps1 -D3D11
 
 ## Known issues
 
-- **Race performance.** Races run at about 3 fps on either renderer. The D3D11 renderer draws the same track at 30–60 fps during the pre-race camera pan, so drawing is not the limit; the cost is on the CPU side while racing and is being investigated (see `NOTES.md`).
-- **CPU renderer.** Menus at 10–15 fps, car bodies render black. Use `-D3D11`.
-- **Small D3D11 glitches.** The ESRB logo's centre panel and border fade at different times; some letters are missing from menu description text (fix in progress).
+- **Race performance.** 15–30 fps, not yet a steady 60.
+- **Pause menu** is barely visible and does not highlight the selected option; **some letters are missing** from menu description text. Both are likely the D3D11 renderer not yet supporting the Xbox GPU's register combiners.
+- **Audio** from a race can keep playing after quitting to the title screen.
+- **CPU renderer.** Slow, car bodies render black. Use `-D3D11`.
 - **Occasional crash at startup** in the USB interrupt path, likely a timing race. Relaunching works.
 - **Xbox Live** features are not supported.
 

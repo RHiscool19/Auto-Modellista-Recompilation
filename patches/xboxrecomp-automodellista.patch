@@ -1,5 +1,5 @@
 diff --git a/src/kernel/nv2a_backend.h b/src/kernel/nv2a_backend.h
-index 87788ed..1e18b5b 100644
+index 87788ed..4eaffa9 100644
 --- a/src/kernel/nv2a_backend.h
 +++ b/src/kernel/nv2a_backend.h
 @@ -38,6 +38,12 @@ typedef struct {
@@ -23,8 +23,37 @@ index 87788ed..1e18b5b 100644
  } Nv2aTexture;
  
  typedef struct {
+@@ -82,11 +89,28 @@ typedef struct {
+     uint32_t stencil_write_mask, stencil_fail, stencil_zfail, stencil_zpass;
+ } Nv2aRenderState;
+ 
++/* Register-combiner program as the title set it (the same words as the
++ * executor's own Nv2aCombiner, nv2a_combiner.h): eight stages of input/output
++ * control words and constants, the final combiner, SET_COMBINER_CONTROL and
++ * SET_SHADER_STAGE_PROGRAM. */
++typedef struct {
++    uint32_t color_icw[8], alpha_icw[8];
++    uint32_t color_ocw[8], alpha_ocw[8];
++    uint32_t factor0[8], factor1[8];
++    uint32_t final0, final1, final_c0, final_c1;
++    uint32_t control, stage_program;
++} Nv2aBackendCombiner;
++
+ typedef struct {
+     const Nv2aVertex  *vertices;    /* triangle list: count is a multiple of 3 */
+     uint32_t           count;
+     const Nv2aTexture *texture;     /* NULL: untextured */
+     const Nv2aRenderState *state;
++    /* NULL: fixed function, texture stage 0 modulated by the diffuse colour.
++     * Otherwise the combiner program the pixels go through. A back end that
++     * ignores it draws texture x diffuse. ponytail: stages 1-3, specular and
++     * fog are not passed yet (v1, fog and t1..t3 read as zero / 0,0,0,1). */
++    const Nv2aBackendCombiner *combiner;
+ } Nv2aBatch;
+ 
+ typedef struct {
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index 57e8f8e..d76eafb 100644
+index 57e8f8e..777ee7f 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
 @@ -806,6 +806,9 @@ static void current_surface(Nv2aSurface *out)
@@ -61,7 +90,35 @@ index 57e8f8e..d76eafb 100644
          s_backend->clear(&surf, &rs, param, s_gpu.clear_color,
                           s_gpu.zstencil_clear);
          s_gpu.clears++;
-@@ -2217,6 +2228,7 @@ static void backend_flush(int textured)
+@@ -2207,6 +2218,27 @@ static void backend_flush(int textured)
+     batch.count = s_bcount;
+     batch.texture = NULL;
+     batch.state = &rs;
++    batch.combiner = NULL;
++    {
++        static Nv2aBackendCombiner bc;
++        static int no_rc = -1;
++
++        if (no_rc < 0)
++            no_rc = getenv("RECOMP_NO_COMBINERS") != NULL;
++        if (s_gpu.rc_seen && !no_rc) {
++            memcpy(bc.color_icw, s_gpu.rc.color_icw, sizeof bc.color_icw);
++            memcpy(bc.alpha_icw, s_gpu.rc.alpha_icw, sizeof bc.alpha_icw);
++            memcpy(bc.color_ocw, s_gpu.rc.color_ocw, sizeof bc.color_ocw);
++            memcpy(bc.alpha_ocw, s_gpu.rc.alpha_ocw, sizeof bc.alpha_ocw);
++            memcpy(bc.factor0, s_gpu.rc.factor0, sizeof bc.factor0);
++            memcpy(bc.factor1, s_gpu.rc.factor1, sizeof bc.factor1);
++            bc.final0 = s_gpu.rc.final0; bc.final1 = s_gpu.rc.final1;
++            bc.final_c0 = s_gpu.rc.final_c0; bc.final_c1 = s_gpu.rc.final_c1;
++            bc.control = s_gpu.rc.control;
++            bc.stage_program = s_gpu.rc.stage_program;
++            batch.combiner = &bc;
++        }
++    }
+     if (textured && s_gpu.texs[0].valid) {
+         tex.offset = s_gpu.texs[0].offset;
+         tex.width  = s_gpu.texs[0].width;
+@@ -2217,6 +2249,7 @@ static void backend_flush(int textured)
          tex.addr_v = s_gpu.texs[0].addr_v;
          tex.levels = s_gpu.texs[0].pitch ? 1 : s_gpu.texs[0].levels;
          tex.filter = s_gpu.texs[0].filter;
@@ -69,7 +126,7 @@ index 57e8f8e..d76eafb 100644
          batch.texture = &tex;
      }
      s_backend->draw(&surf, &batch);
-@@ -3341,9 +3353,50 @@ static void raster_batch_program(void)
+@@ -3341,9 +3374,50 @@ static void raster_batch_program(void)
  
      if (!s_xf && !(s_xf = (Nv2aVshOutput *)calloc(NV_MAX_INDICES, sizeof *s_xf)))
          return;

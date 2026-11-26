@@ -37,6 +37,9 @@ $env:RECOMP_INPUT_DIAG    = "1"   # report whether the input chain is wired
 # and the USB model reads the game's .data instead of the controller's
 # descriptors: enumeration never starts and the pad is never seen.
 $env:RECOMP_CONTIG_AVOID_IMAGE = "1"
+$env:RECOMP_HEAP_RECLAIM  = "1"   # reuse freed heap/contiguous memory; without it a second race exhausts the 64 MB GPU pool and crashes
+$env:RECOMP_AUDIO_BUF_SAMPLES = "1024" # 6 x 1024 samples = 128 ms of audio queued: rides out the 20-80 ms gaps
+$env:RECOMP_AUDIO_BUF_COUNT   = "6"    # in the APU thread that underran the default 43 ms (menu stutter)
 $env:RECOMP_GUEST_CPUS    = "0"   # all guest threads on one core, like the Xbox (CRI's suspend/resume scheduling needs it)
 # RECOMP_GUEST_LOCK=1 deadlocked at CRI's thread creation (main holds the lock
 # while the new thread needs it to start), so make sure it is off:

@@ -76,6 +76,60 @@ typedef struct {
     float alpha_func, alpha_ref, tex_w, tex_h;
 } Consts;
 
+/* Mirrors cbuffer RC (b1). 448 bytes. */
+typedef struct {
+    uint32_t st[8][4];            /* color_icw, alpha_icw, color_ocw, alpha_ocw */
+    float    f0[8][4], f1[8][4];  /* factor0/1 as r,g,b,a */
+    uint32_t fin[4];              /* final0, final1, control, stage_program */
+    float    fc0[4], fc1[4];
+    uint32_t on[4];
+} RcConsts;
+typedef char rc_consts_is_448[(sizeof(RcConsts) == 448) ? 1 : -1];
+static ID3D11Buffer *s_rc_cb;
+static int           s_rc_enabled = 1;   /* AM_D3D11_COMBINERS=0 turns them off */
+static unsigned      s_st_rc;            /* draws that went through the combiners */
+
+static unsigned      s_st_rc_skip;       /* combiner programs that need inputs we don't pass yet */
+
+/* 1 if the program reads only what this back end supplies: v0, t0, c0/c1,
+ * zero, r0/r1. Registers 3 (fog), 5 (v1) and 9-11 (t1-t3), or texture stages
+ * 1-3 switched on, need inputs the interface does not carry yet; such a
+ * program is drawn as texture x diffuse instead, which is what the game
+ * looked like before combiners and is far closer than a black result. */
+static int rc_supported(const Nv2aBackendCombiner *bc)
+{
+    uint32_t n = bc->control & 0xFF, s, k;
+    if (n > 8) n = 8;
+    if (bc->stage_program & ~0x1Fu) return 0;          /* stages 1-3 in use */
+    for (s = 0; s < n; s++)
+        for (k = 0; k < 4; k++) {
+            uint32_t c = (bc->color_icw[s] >> (8 * k)) & 0xFF, a = (bc->alpha_icw[s] >> (8 * k)) & 0xFF;
+            uint32_t rc_ = c & 0xF, ra = a & 0xF;
+            if (rc_ == 3 || rc_ == 5 || (rc_ >= 9 && rc_ <= 11)) return 0;
+            if (ra == 3 || ra == 5 || (ra >= 9 && ra <= 11)) return 0;
+        }
+    if (bc->final0 || bc->final1) {
+        for (k = 0; k < 4; k++) {
+            uint32_t r0_ = (bc->final0 >> (8 * k)) & 0xF;
+            if (r0_ == 3 || r0_ == 5 || r0_ == 14 || (r0_ >= 9 && r0_ <= 11)) return 0;
+        }
+        for (k = 1; k < 4; k++) {                      /* E, F, G (byte 0 is flags) */
+            uint32_t r1_ = (bc->final1 >> (8 * k)) & 0xF;
+            if (r1_ == 3 || r1_ == 5 || r1_ == 14 || (r1_ >= 9 && r1_ <= 11)) return 0;
+        }
+    }
+    return 1;
+}
+
+static void unpack_argb(uint32_t c, float o[4])
+{
+    o[0] = (float)((c >> 16) & 0xFF) / 255.0f;
+    o[1] = (float)((c >> 8) & 0xFF) / 255.0f;
+    o[2] = (float)(c & 0xFF) / 255.0f;
+    o[3] = (float)(c >> 24) / 255.0f;
+}
+static RcConsts      s_rc_last;
+static int           s_rc_last_valid;
 /* ---- Shaders ------------------------------------------------------------ */
 
 static const char s_hlsl[] =
@@ -94,9 +148,78 @@ static const char s_hlsl[] =
 "  o.pos = float4(x * w, y * w, z * w, w);\n"
 "  o.c = i.c; o.uv = i.uv / texSize;\n"
 "  return o; }\n"
+"cbuffer RC : register(b1) {\n"
+"  uint4 rcSt[8]; float4 rcF0[8]; float4 rcF1[8];\n"
+"  uint4 rcFin; float4 rcFc0; float4 rcFc1; uint4 rcOn; };\n"
+"float mapIn(float x, uint b) {\n"
+"  float p = max(x, 0.0); uint m = (b >> 5) & 7;\n"
+"  if (m == 0) return p; if (m == 1) return 1.0 - saturate(x);\n"
+"  if (m == 2) return 2.0 * p - 1.0; if (m == 3) return -2.0 * p + 1.0;\n"
+"  if (m == 4) return p - 0.5; if (m == 5) return -p + 0.5;\n"
+"  if (m == 6) return x; return -x; }\n"
+"float mapOut(float x, uint m) {\n"
+"  if (m == 0x08) return x - 0.5; if (m == 0x10) return x * 2.0;\n"
+"  if (m == 0x18) return (x - 0.5) * 2.0; if (m == 0x20) return x * 4.0;\n"
+"  if (m == 0x30) return x * 0.5; return x; }\n"
+"float3 mapOut3(float3 v, uint m) { return float3(mapOut(v.x, m), mapOut(v.y, m), mapOut(v.z, m)); }\n"
+"float3 rdRGB(float4 R[16], uint b) {\n"
+"  b &= 0xFF; float4 r = R[b & 15]; float3 v = (b & 16) ? r.aaa : r.rgb;\n"
+"  return float3(mapIn(v.x, b), mapIn(v.y, b), mapIn(v.z, b)); }\n"
+"float rdA(float4 R[16], uint b) {\n"
+"  b &= 0xFF; float4 r = R[b & 15]; return mapIn((b & 16) ? r.a : r.b, b); }\n"
+"float4 rcEval(float4 v0, float4 t0) {\n"
+"  float4 R[16]; uint k;\n"
+"  [unroll] for (k = 0; k < 16; k++) R[k] = float4(0, 0, 0, 0);\n"
+"  R[4] = v0; R[8] = t0; R[9] = float4(0,0,0,1); R[10] = float4(0,0,0,1); R[11] = float4(0,0,0,1);\n"
+"  R[12].a = (rcFin.w & 0x1F) ? t0.a : 1.0;\n"
+"  uint n = min(rcFin.z & 0xFF, 8), fl0 = rcFin.z >> 8;\n"
+"  [loop] for (uint s = 0; s < n; s++) {\n"
+"    uint icw = rcSt[s].x, aicw = rcSt[s].y, ocw = rcSt[s].z, aocw = rcSt[s].w;\n"
+"    uint fl = ocw >> 12, afl = aocw >> 12, d;\n"
+"    R[1] = rcF0[(fl0 & 0x010) ? s : 0]; R[2] = rcF1[(fl0 & 0x100) ? s : 0];\n"
+"    bool mux = (fl0 & 1) ? (R[12].a >= 0.5) : ((((int)(R[12].a * 255.0)) & 1) != 0);\n"
+"    float3 A = rdRGB(R, icw >> 24), B = rdRGB(R, icw >> 16), C = rdRGB(R, icw >> 8), D = rdRGB(R, icw);\n"
+"    float aA = rdA(R, aicw >> 24), aB = rdA(R, aicw >> 16), aC = rdA(R, aicw >> 8), aD = rdA(R, aicw);\n"
+"    float3 pab = (fl & 2) ? dot(A, B).xxx : A * B;\n"
+"    float3 pcd = (fl & 1) ? dot(C, D).xxx : C * D;\n"
+"    float3 sm = (fl & 4) ? (mux ? pcd : pab) : pab + pcd;\n"
+"    float3 ab = clamp(mapOut3(pab, fl & 0x38), -1.0, 1.0);\n"
+"    float3 cd = clamp(mapOut3(pcd, fl & 0x38), -1.0, 1.0);\n"
+"    float3 ms = clamp(mapOut3(sm, fl & 0x38), -1.0, 1.0);\n"
+"    float qab = aA * aB, qcd = aC * aD;\n"
+"    float qs = (afl & 4) ? (mux ? qcd : qab) : qab + qcd;\n"
+"    float aab = clamp(mapOut(qab, afl & 0x38), -1.0, 1.0);\n"
+"    float acd = clamp(mapOut(qcd, afl & 0x38), -1.0, 1.0);\n"
+"    float ams = clamp(mapOut(qs, afl & 0x38), -1.0, 1.0);\n"
+"    d = (ocw >> 4) & 15; if (d) { R[d].rgb = ab; if (fl & 0x80) R[d].a = ab.b; }\n"
+"    d = ocw & 15;        if (d) { R[d].rgb = cd; if (fl & 0x40) R[d].a = cd.b; }\n"
+"    d = (ocw >> 8) & 15; if (d) R[d].rgb = ms;\n"
+"    d = (aocw >> 4) & 15; if (d) R[d].a = aab;\n"
+"    d = aocw & 15;        if (d) R[d].a = acd;\n"
+"    d = (aocw >> 8) & 15; if (d) R[d].a = ams;\n"
+"    R[0] = float4(0, 0, 0, 0); }\n"
+"  float4 o;\n"
+"  if (rcFin.x || rcFin.y) {\n"
+"    uint f0 = rcFin.x, f1 = rcFin.y, ff = f1 & 0xFF;\n"
+"    R[1] = rcFc0; R[2] = rcFc1;\n"
+"    float3 sa = (ff & 0x40) ? 1.0 - R[5].rgb : R[5].rgb;\n"
+"    float3 sb = (ff & 0x20) ? 1.0 - R[12].rgb : R[12].rgb;\n"
+"    R[14] = float4((ff & 0x80) ? saturate(sa + sb) : sa + sb, 0);\n"
+"    float3 E = rdRGB(R, f1 >> 24), F = rdRGB(R, f1 >> 16);\n"
+"    R[15] = float4(E * F, 0);\n"
+"    float3 A = rdRGB(R, f0 >> 24), B = rdRGB(R, f0 >> 16), C = rdRGB(R, f0 >> 8), D = rdRGB(R, f0);\n"
+"    o = float4(D + C * (1.0 - A) + B * A, rdA(R, f1 >> 8));\n"
+"  } else o = R[12];\n"
+"  return saturate(o); }\n"
 "float4 ps_main(PI i) : SV_Target {\n"
-"  float4 col = i.c;\n"
-"  if (textured > 0.5) col *= T.Sample(S, i.uv);\n"
+"  float4 col;\n"
+"  if (rcOn.x) {\n"
+"    float4 t0 = (textured > 0.5) ? T.Sample(S, i.uv) : float4(0, 0, 0, 1);\n"
+"    col = rcEval(i.c, t0);\n"
+"  } else {\n"
+"    col = i.c;\n"
+"    if (textured > 0.5) col *= T.Sample(S, i.uv);\n"
+"  }\n"
 "  if (alphaFunc >= 0.0) {\n"
 "    float a = round(col.a * 255.0); int f = (int)alphaFunc; bool ok = true;\n"
 "    if (f == 0) ok = false;\n"
@@ -238,6 +361,8 @@ static int init(void)
     bd.ByteWidth = sizeof(Consts);
     bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     if (FAILED(ID3D11Device_CreateBuffer(s_dev, &bd, NULL, &s_cb))) return 0;
+    bd.ByteWidth = sizeof(RcConsts);
+    if (FAILED(ID3D11Device_CreateBuffer(s_dev, &bd, NULL, &s_rc_cb))) return 0;
 
     /* Culling is done per triangle on the CPU from projected positions (see
      * nv2a_backend.h's advice), so the rasteriser never culls. */
@@ -260,6 +385,10 @@ static int init(void)
     if (!s_vs || !s_ps || !s_blit_vs || !s_blit_ps || !s_rs || !s_rs_scissor || !s_blit_sampler)
         return 0;
     s_init_failed = 0;
+    {
+        const char *e = getenv("AM_D3D11_COMBINERS");
+        s_rc_enabled = !(e && e[0] == '0');
+    }
     s_ready = 1;
     fprintf(stderr, "[D3D11] back end up\n");
     return 1;
@@ -291,13 +420,13 @@ static Target  *s_present;         /* the surface to show at flip */
 static unsigned s_st_draws, s_st_texreq, s_st_texok, s_st_rtt, s_st_rtt_self, s_st_rtt_guest;
 static uint32_t s_frame = 1;
 
-static uint32_t tex_hash(const Nv2aTexture *t);
+static uint32_t tex_hash(const Nv2aTexture *t, int full);
 
 /* 1: sample this target from guest memory instead of the GPU copy. */
 static int target_cpu_newer(Target *rt, const Nv2aTexture *tx)
 {
     if (rt->hash_frame != s_frame) {
-        uint32_t h = tex_hash(tx);
+        uint32_t h = tex_hash(tx, 0);
         rt->hash_frame = s_frame;
         if (!rt->hash_init) { rt->hash_init = 1; rt->guest_hash = h; }
         else if (h != rt->guest_hash) { rt->guest_hash = h; rt->cpu_frame = s_frame; }
@@ -439,6 +568,9 @@ typedef struct {
     int      used;
     uint32_t offset, w, h, pitch, color, palette;
     uint32_t hash, checked_frame, last_used;
+    int      dynamic;       /* changed after creation: re-checked on every draw */
+    uint32_t hash_full;     /* whole-texture hash (textures <= 256 KB) */
+    int      hash_full_valid;
     ID3D11Texture2D *tex;
     ID3D11ShaderResourceView *srv;    /* NULL if the format could not be decoded */
 } TexEntry;
@@ -456,26 +588,62 @@ static int guest_readable(uint32_t va, uint32_t len)
     return 0;
 }
 
-/* Sparse hash: the first 256 bytes plus 64 dwords spread over the smallest
- * size the texture can have (DXT1 is half a byte per texel). Cheap enough to
- * run on every texture once per frame; catches nearly every real change. */
-static uint32_t tex_hash(const Nv2aTexture *t)
+/* Bytes per texel for NV097 colour formats (DXT handled separately); 4 for
+ * codes not listed, which can only over-hash a little memory past the end. */
+static uint32_t nv_format_bpp(uint32_t f)
 {
-    uint32_t len = t->width * t->height / 2, h = 2166136261u, i, step;
+    switch (f) {
+    case 0x00: case 0x01: case 0x0B: case 0x13: case 0x19: case 0x1B: case 0x1F:
+        return 1;                                     /* Y8, AY8, P8, A8 (+LU) */
+    case 0x02: case 0x03: case 0x04: case 0x05: case 0x10: case 0x11: case 0x1A:
+    case 0x1C: case 0x1D: case 0x20: case 0x24: case 0x25: case 0x27: case 0x28:
+    case 0x29: case 0x30: case 0x31:
+        return 2;                                     /* 16-bit colour/YUV/A8Y8 */
+    default:
+        return 4;
+    }
+}
+
+/* Bytes the texture occupies in guest memory (level 0). */
+static uint32_t tex_bytes(const Nv2aTexture *t)
+{
+    uint32_t blk = 0;
+    if (t->color == 0x0C) blk = 8;
+    else if (t->color == 0x0E || t->color == 0x0F) blk = 16;
+    if (blk) return ((t->width + 3) / 4) * ((t->height + 3) / 4) * blk;
+    if (t->pitch) return t->pitch * t->height;
+    return t->width * t->height * nv_format_bpp(t->color);
+}
+
+/* Change detection, once per frame per texture. Textures up to 256 KB are
+ * hashed whole: the menu description text is written into its texture by the
+ * CPU a glyph at a time, and a sparse sample (256 bytes + 64 dwords, the
+ * first version) missed most of the glyphs written after the first upload --
+ * those letters never appeared. Bigger textures (track, car) rarely change
+ * after loading and keep a sparse sample of 1,024 points. */
+#define TEX_FULL_HASH_MAX (256u * 1024u)
+static uint32_t tex_hash(const Nv2aTexture *t, int full)
+{
+    uint32_t len = tex_bytes(t), i;
+    uint64_t h = 1469598103934665603ull;
     const uint8_t *base;
 
-    if (len < 256) len = 256;
+    if (len < 8) len = 8;
     if (!guest_readable(t->offset, len)) return 0;
     base = (const uint8_t *)xbox_GetMemoryOffset() + t->offset;
-    for (i = 0; i < 256; i += 4) { h ^= *(const uint32_t *)(base + i); h *= 16777619u; }
-    step = (len / 64) & ~3u;
-    if (step)
-        for (i = 0; i < 64; i++) { h ^= *(const uint32_t *)(base + i * step); h *= 16777619u; }
-    if (t->palette && guest_readable(t->palette, 1024)) {
-        const uint32_t *pal = (const uint32_t *)((const uint8_t *)xbox_GetMemoryOffset() + t->palette);
-        for (i = 0; i < 256; i += 8) { h ^= pal[i]; h *= 16777619u; }
+    if (full && len <= TEX_FULL_HASH_MAX) {
+        const uint64_t *q = (const uint64_t *)base;
+        uint32_t n = len / 8;
+        for (i = 0; i < n; i++) { h ^= q[i]; h *= 1099511628211ull; }
+    } else {
+        uint32_t step = (len / 1024) & ~7u;
+        for (i = 0; i < 1024; i++) { h ^= *(const uint64_t *)(base + (size_t)i * step); h *= 1099511628211ull; }
     }
-    return h ^ len;
+    if (t->palette && guest_readable(t->palette, 1024)) {
+        const uint64_t *pal = (const uint64_t *)((const uint8_t *)xbox_GetMemoryOffset() + t->palette);
+        for (i = 0; i < 128; i++) { h ^= pal[i]; h *= 1099511628211ull; }
+    }
+    return (uint32_t)(h ^ (h >> 32)) ^ len;
 }
 
 static void tex_release(TexEntry *e)
@@ -541,10 +709,32 @@ static ID3D11ShaderResourceView *tex_get(const Nv2aTexture *t)
         if (c->last_used < s_tex[lru].last_used || !s_tex[lru].used) lru = i;
     }
     if (e) {
-        if (e->checked_frame != s_frame) {
-            uint32_t h = tex_hash(t);
+        /* Dynamic textures (the game rewrote them after the first upload --
+         * text it renders a string at a time, often several strings through
+         * one texture in a frame) are hashed whole on every draw. The rest
+         * get a sparse hash once a frame and a whole one every 32 frames,
+         * staggered by slot, so a static menu doesn't pay to re-hash every
+         * background every frame (menus fell from 60 to 40 fps when it did). */
+        int slot = (int)(e - s_tex);
+        int recheck = e->dynamic || e->checked_frame != s_frame;
+        if (recheck) {
+            int full = e->dynamic || ((s_frame + (uint32_t)slot) & 31u) == 0;
+            uint32_t h;
+            h = tex_hash(t, full);
             e->checked_frame = s_frame;
-            if (h != e->hash) { e->hash = h; tex_upload(e, t); }
+            if (full) {
+                if (h != e->hash_full) {
+                    if (e->hash_full_valid) e->dynamic = 1;
+                    e->hash_full = h; e->hash_full_valid = 1;
+                    tex_upload(e, t);
+                    e->hash = tex_hash(t, 0);
+                }
+            } else if (h != e->hash) {
+                e->hash = h;
+                e->dynamic = 1;
+                tex_upload(e, t);
+                e->hash_full = tex_hash(t, 1); e->hash_full_valid = 1;
+            }
         }
         e->last_used = s_frame;
         return e->srv;
@@ -555,7 +745,8 @@ static ID3D11ShaderResourceView *tex_get(const Nv2aTexture *t)
     e->used = 1;
     e->offset = t->offset; e->w = t->width; e->h = t->height;
     e->color = t->color; e->pitch = t->pitch; e->palette = t->palette;
-    e->hash = tex_hash(t);
+    e->hash = tex_hash(t, 0);
+    e->hash_full = tex_hash(t, 1); e->hash_full_valid = 1;
     e->checked_frame = e->last_used = s_frame;
     tex_upload(e, t);
     return e->srv;
@@ -810,7 +1001,7 @@ static void be_clear(const Nv2aSurface *s, const Nv2aRenderState *rs,
         v[0].x = x0; v[0].y = y0; v[1].x = x1; v[1].y = y0; v[2].x = x0; v[2].y = y1;
         v[3].x = x1; v[3].y = y0; v[4].x = x1; v[4].y = y1; v[5].x = x0; v[5].y = y1;
         for (k = 0; k < 6; k++) { v[k].z = depth * s_zscale; v[k].rhw = 1.0f; }
-        qb.vertices = v; qb.count = 6; qb.texture = NULL; qb.state = &q;
+        qb.vertices = v; qb.count = 6; qb.texture = NULL; qb.state = &q; qb.combiner = NULL;
         be_draw(&qs, &qb);
     }
     if ((flags & 0x3) && t->dsv && full) {
@@ -895,6 +1086,62 @@ static void be_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     ID3D11DeviceContext_PSSetShader(s_ctx, s_ps, NULL, 0);
     ID3D11DeviceContext_VSSetConstantBuffers(s_ctx, 0, 1, &s_cb);
     ID3D11DeviceContext_PSSetConstantBuffers(s_ctx, 0, 1, &s_cb);
+    {
+        /* Combiner program: re-uploaded only when it changes. */
+        RcConsts rc;
+        const Nv2aBackendCombiner *bc = b->combiner;
+        int k;
+
+        memset(&rc, 0, sizeof rc);
+        if (bc) {
+            /* Each distinct program once (up to 48): what the game asks of
+             * the combiners, and whether this back end can run it yet. */
+            static uint32_t seen[48]; static int nseen;
+            uint32_t h = 2166136261u; int q, dup = 0;
+            const uint32_t *w = (const uint32_t *)bc;
+            for (q = 0; q < (int)(sizeof *bc / 4); q++) { h ^= w[q]; h *= 16777619u; }
+            for (q = 0; q < nseen; q++) if (seen[q] == h) dup = 1;
+            if (!dup && nseen < 48) {
+                uint32_t st, n = bc->control & 0xFF;
+                seen[nseen++] = h;
+                fprintf(stderr, "[RC] prog %08X %s: stages %u control %08X stage_prog %08X final %08X %08X fc %08X %08X\n",
+                        h, rc_supported(bc) ? "ok" : "FALLBACK", n, bc->control, bc->stage_program,
+                        bc->final0, bc->final1, bc->final_c0, bc->final_c1);
+                for (st = 0; st < n && st < 8; st++)
+                    fprintf(stderr, "[RC]   %u: cI %08X aI %08X cO %08X aO %08X f0 %08X f1 %08X\n", st,
+                            bc->color_icw[st], bc->alpha_icw[st], bc->color_ocw[st], bc->alpha_ocw[st],
+                            bc->factor0[st], bc->factor1[st]);
+            }
+        }
+        if (bc && s_rc_enabled && !rc_supported(bc)) {
+            s_st_rc_skip++;
+            bc = NULL;
+        }
+        if (bc && s_rc_enabled) {
+            for (k = 0; k < 8; k++) {
+                rc.st[k][0] = bc->color_icw[k]; rc.st[k][1] = bc->alpha_icw[k];
+                rc.st[k][2] = bc->color_ocw[k]; rc.st[k][3] = bc->alpha_ocw[k];
+                unpack_argb(bc->factor0[k], rc.f0[k]);
+                unpack_argb(bc->factor1[k], rc.f1[k]);
+            }
+            rc.fin[0] = bc->final0; rc.fin[1] = bc->final1;
+            rc.fin[2] = bc->control; rc.fin[3] = bc->stage_program;
+            unpack_argb(bc->final_c0, rc.fc0);
+            unpack_argb(bc->final_c1, rc.fc1);
+            rc.on[0] = 1;
+            s_st_rc++;
+        }
+        if (!s_rc_last_valid || memcmp(&rc, &s_rc_last, sizeof rc)) {
+            D3D11_MAPPED_SUBRESOURCE rm;
+            if (SUCCEEDED(ID3D11DeviceContext_Map(s_ctx, (ID3D11Resource *)s_rc_cb, 0,
+                                                  D3D11_MAP_WRITE_DISCARD, 0, &rm))) {
+                memcpy(rm.pData, &rc, sizeof rc);
+                ID3D11DeviceContext_Unmap(s_ctx, (ID3D11Resource *)s_rc_cb, 0);
+                s_rc_last = rc; s_rc_last_valid = 1;
+            }
+        }
+        ID3D11DeviceContext_PSSetConstantBuffers(s_ctx, 1, 1, &s_rc_cb);
+    }
     ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, 1, &srv);
     ID3D11DeviceContext_PSSetSamplers(s_ctx, 0, 1, &samp);
     {
@@ -1009,12 +1256,12 @@ static void be_flip(void)
             if (stats && ++tick % 5 == 0) {
                 int i, nt = 0;
                 for (i = 0; i < MAX_TARGETS; i++) if (s_targets[i].tex) nt++;
-                fprintf(stderr, "[D3D11] %u draws, textured %u/%u (rtt %u, self %u, guest %u), %u regrows,"
+                fprintf(stderr, "[D3D11] %u draws (%u combiner, %u fallback), textured %u/%u (rtt %u, self %u, guest %u), %u regrows,"
                         " %d targets, present 0x%08X %ux%u\n",
-                        s_st_draws, s_st_texok, s_st_texreq, s_st_rtt, s_st_rtt_self, s_st_rtt_guest, s_st_regrow, nt,
+                        s_st_draws, s_st_rc, s_st_rc_skip, s_st_texok, s_st_texreq, s_st_rtt, s_st_rtt_self, s_st_rtt_guest, s_st_regrow, nt,
                         s_present ? s_present->color_va : 0,
                         s_present ? s_present->w : 0, s_present ? s_present->h : 0);
-                s_st_draws = s_st_texreq = s_st_texok = s_st_rtt = s_st_rtt_self = s_st_rtt_guest = s_st_regrow = 0;
+                s_st_draws = s_st_texreq = s_st_texok = s_st_rtt = s_st_rtt_self = s_st_rtt_guest = s_st_regrow = s_st_rc = s_st_rc_skip = 0;
             }
         }
         fps_t0 = GetTickCount();

@@ -14,5 +14,9 @@
   {
     "start": "0x001F2395",
     "note": "indirect-call target that failed to resolve millions of times during races (inside the CRT/middleware block near 0x1F0E2D)"
+  },
+  {
+    "start": "0x000E02A0",
+    "note": "indirect-call target that failed millions of times on Osaka hi.way (sub-1 fps)"
   }
 ]
