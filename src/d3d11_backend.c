@@ -790,6 +790,84 @@ static void tex_release(TexEntry *e)
     if (e->tex) { ID3D11Texture2D_Release(e->tex); e->tex = NULL; }
 }
 
+/* Fast whole-texture decode for the formats this game uses: P8 swizzled
+ * (0x0B, nearly every texture) and 32-bit ARGB, linear (0x12) or swizzled
+ * (0x06/0x07). The generic path decodes through the executor's per-texel
+ * sampler -- a function call, a format switch and a Morton deposit per
+ * texel, 1-4 ms per texture -- and the pre-race camera pan, where ~100 new
+ * textures appear within a few seconds, dropped to ~40 fps on it. This walks
+ * the swizzle with the masked-increment trick (as xbox_unswizzle_rect does)
+ * and returns the same values the sampler would. 0: not handled here. */
+static int is_pow2(uint32_t v) { return v && !(v & (v - 1)); }
+
+static void swz_masks(uint32_t w, uint32_t h, uint32_t *mx, uint32_t *my)
+{
+    uint32_t x = 0, y = 0, bit = 1, mb = 1;
+    while (bit < w || bit < h) {
+        if (bit < w) { x |= mb; mb <<= 1; }
+        if (bit < h) { y |= mb; mb <<= 1; }
+        bit <<= 1;
+    }
+    *mx = x; *my = y;
+}
+
+static int fast_decode(const Nv2aTexture *t, uint32_t *out)
+{
+    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+    uint32_t w = t->width, h = t->height, x, y, mx, my, oy = 0;
+
+    switch (t->color) {
+    case 0x0B: {                                     /* SZ_I8_A8R8G8B8 */
+        const uint8_t *src;
+        const uint32_t *pal;
+        if (!is_pow2(w) || !is_pow2(h) || !t->palette) return 0;
+        if (!guest_readable(t->offset, w * h) || !guest_readable(t->palette, 1024)) return 0;
+        src = mem + t->offset;
+        pal = (const uint32_t *)(mem + t->palette);
+        swz_masks(w, h, &mx, &my);
+        for (y = 0; y < h; y++) {
+            uint32_t ox = 0, *row = out + (size_t)y * w;
+            for (x = 0; x < w; x++) {
+                row[x] = pal[src[oy + ox]];
+                ox = (ox - mx) & mx;
+            }
+            oy = (oy - my) & my;
+        }
+        return 1;
+    }
+    case 0x06: case 0x07: {                          /* SZ_A8R8G8B8 / SZ_X8R8G8B8 */
+        const uint32_t *src;
+        uint32_t or_mask = t->color == 0x07 ? 0xFF000000u : 0;
+        if (!is_pow2(w) || !is_pow2(h)) return 0;
+        if (!guest_readable(t->offset, w * h * 4)) return 0;
+        src = (const uint32_t *)(mem + t->offset);
+        swz_masks(w, h, &mx, &my);
+        for (y = 0; y < h; y++) {
+            uint32_t ox = 0, *row = out + (size_t)y * w;
+            for (x = 0; x < w; x++) {
+                row[x] = src[oy + ox] | or_mask;
+                ox = (ox - mx) & mx;
+            }
+            oy = (oy - my) & my;
+        }
+        return 1;
+    }
+    case 0x12: case 0x1E: {                          /* LIN_A8R8G8B8 / LIN_X8R8G8B8 */
+        uint32_t or_mask = t->color == 0x1E ? 0xFF000000u : 0;
+        if (!t->pitch || t->pitch < w * 4) return 0;
+        if (!guest_readable(t->offset, t->pitch * h)) return 0;
+        for (y = 0; y < h; y++) {
+            const uint32_t *src = (const uint32_t *)(mem + t->offset + (size_t)y * t->pitch);
+            uint32_t *row = out + (size_t)y * w;
+            if (!or_mask) memcpy(row, src, (size_t)w * 4);
+            else for (x = 0; x < w; x++) row[x] = src[x] | or_mask;
+        }
+        return 1;
+    }
+    }
+    return 0;
+}
+
 static void tex_upload_impl(TexEntry *e, const Nv2aTexture *t);
 static void tex_upload(TexEntry *e, const Nv2aTexture *t)
 {
@@ -817,7 +895,7 @@ static void tex_upload_impl(TexEntry *e, const Nv2aTexture *t)
         s_decode_cap = s_decode_buf ? need : 0;
         if (!s_decode_buf) return;
     }
-    if (!nv2a_backend_decode_texture(t, s_decode_buf)) {
+    if (!fast_decode(t, s_decode_buf) && !nv2a_backend_decode_texture(t, s_decode_buf)) {
         /* Once per format code: what the back end cannot show. */
         static uint32_t told[64]; static int ntold;
         int k, seen = 0;

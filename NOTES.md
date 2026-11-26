@@ -185,6 +185,22 @@ of ~30 s. Remaining: one dip to ~40 during the pre-race camera pan when cars loa
 122 ms of decode on the GPU thread) -> decode textures off-thread or warm the cache during the loading screen.
 Lesson: logging on hot threads was the biggest single cost in the port.
 
+Pan dip fix attempt: fast whole-texture decode in d3d11_backend.c (P8 swizzled 0x0B, 32-bit swizzled 0x06/0x07,
+linear 0x12/0x1E) instead of the executor's per-texel sampler. In races every texture is 0x0B (556 of 568 uses).
+If a hitch remains: per-track texture list warmed during the loading screen, or decode on worker threads.
+RESULT: 54 uploads in 5 ms (was 98 in 122 ms, ~20x faster). Pan dip gone; whole session 58.5-60 fps (10 s
+averages), 0 underruns. Audio hangs: none in race -> pause-quit -> second race. Likely the streaming voices were
+starved by the frame stalls; treat as fixed unless it returns.
+
+## Switch port: things tonight's work implies
+- 3 usable ARM cores, much slower per core: game thread + GPU executor take two. Worker pools sized from the
+  core count (1 on Switch).
+- GPU executor must not busy-spin (battery/heat): replace nv2a_ack_thread's Sleep(0) loop with a real "PUT
+  moved" signal. Do it properly; -GpuIdleUs (a timer) hurt audio, because the APU side relies on that loop.
+- Logging compiled out of release builds; meters (RECOMP_XF_TIME) and profiler are PC-only.
+- Back end: deko3d or Vulkan instead of D3D11. Executor/kernel fixes carry over; HLSL combiner/fog shaders need
+  a GLSL/SPIR-V twin. Keep textures in the formats the GPU reads natively (BC for DXT) to skip decode.
+
 ## Milestone: first BETA
 Ship when **arcade mode is playable without stutters**. The beta also brings the clang build and the companion
 app (verify + build). After the beta: test garage life (expect more unrecompiled indirect-call targets there).
@@ -195,8 +211,7 @@ Open, in order:
 3. **GPU vertex programs**: races 28-57 fps, dips in busy sections; vertex work is all on the CPU
 4. **cli/sti as real interrupt masking**: XPP (USB driver) guards its lists with cli/sti, emitted as no-ops; the
    OHCI model's interrupt thread can land inside -> the occasional startup crash and startup hang (0 flips)
-5. **Audio hangs** (a voice keeps looping, after race/quit): re-check after 1-2; if still there, log voice
-   start/stop to find the stop that never arrives
+5. ~~Audio hangs~~: gone once the stalls were (buffered logging, fast texture decode). Re-open if seen again
 6. Clang build (llvm-mingw / clang-cl; also the Switch toolchain) + companion app
 7. Later: honest sub_00209540, Switch branch
 
