@@ -140,13 +140,21 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
 option(AM_OPTIMIZE_GEN "Optimize generated recomp code (except AM_GEN_NOOPT_FILES)" ON)
 set(AM_GEN_NOOPT_FILES "recomp_0012.c" CACHE STRING
     "Generated files compiled without optimization (semicolon-separated)")
+# Flags for those files. /Od is the safe default; "/O1;/Ob0" (optimize for
+# size, no inlining) is lighter on the optimizer and worth trying, since the
+# slow file seems to hold the audio decoder.
+set(AM_GEN_NOOPT_FLAGS "/Od;/Ob0" CACHE STRING
+    "Compile options for AM_GEN_NOOPT_FILES (semicolon-separated)")
 if(MSVC)
     target_compile_options(${PROJECT_NAME} PRIVATE /MP)
     foreach(gen_src ${RECOMP_GEN_SOURCES})
         get_filename_component(gen_name ${gen_src} NAME)
-        if(NOT AM_OPTIMIZE_GEN OR gen_name IN_LIST AM_GEN_NOOPT_FILES)
+        if(NOT AM_OPTIMIZE_GEN)
             set_source_files_properties(${gen_src} PROPERTIES
                 COMPILE_OPTIONS "/Od;/Ob0")
+        elseif(gen_name IN_LIST AM_GEN_NOOPT_FILES)
+            set_source_files_properties(${gen_src} PROPERTIES
+                COMPILE_OPTIONS "${AM_GEN_NOOPT_FLAGS}")
         endif()
     endforeach()
 endif()
