@@ -162,21 +162,32 @@ Done (D3D11 renderer, 2026-11-25):
 - ~~Striped save/load dialog background~~: correct on -D3D11
 - ~~Black / flickering cars~~: correct colours on -D3D11 (CPU renderer still shows it)
 
-Open, in order (2026-11-25 evening):
-1. **Osaka hi.way < 1 fps**: ICALL to unrecompiled 0x000E02A0 (5,130 failures). Seeded -> full regen + test.
-2. **Glyphs**: description text fixed by whole-texture hashing; loading-screen glyphs still missing and menus fell
-   60 -> 40 fps from hashing every texture whole every frame. Now: textures that change after creation are marked
-   dynamic and re-hashed (whole) on every draw (one text texture reused for several strings per frame); others sparse
-   per frame + whole every 32 frames, staggered.
-3. **Audio hangs after a race / quit**: a voice keeps looping (one sound, then another; on exit a buzz + beeping).
-   Also menu stutter remains (APU thread gaps up to 90 ms even with the 128 ms buffer).
-4. **Combiners**: 6 programs in the whole game; 5 run. The 6th is fog (final 130C0300 = mix(fog, r0, fog.a)) -> pass
-   fog colour + per-vertex fog factor next. Pause menu correct.
-5. **Occasional one-frame black flash in races**: guard added (a flip whose surface got no draws since the last
-   flip is not presented; stats line counts `empty flips held`). If flashes persist, the cause is elsewhere.
-6. Race 15-35 fps (Suzuka/US speedway). Full single race + results + replay work.
-6. Release v0.2.0-alpha after 1-2 test.
-7. Later: GPU vertex programs, APU MMIO without exceptions, honest sub_00209540, USB ISR race, Switch branch
+Done since v0.2.0 (2026-11-25 night):
+- ~~Osaka < 1 fps~~ (seed 0x000E02A0), ~~Screen adjust 2-3 fps~~ (seed 0x0008E880)
+- ~~Missing/garbled menu text~~: swizzled textures carried a stale pitch, so the P8 128x128 glyph sheet was sized
+  2560x128 = 320 KB -> treated as "big", never hashed whole, sparse samples landed outside it. tex_bytes now uses
+  the pitch only for linear formats; whole-texture check every 32 frames at any size; changed textures hashed
+  whole every frame
+- ~~Menus 16 fps~~: fog put every draw on the combiner shader, whose indexed register array spilled to scratch.
+  Each combiner program now gets its own pixel shader with the stage words baked in (loop unrolled)
+- ~~Fog~~: per-vertex fog factor + fog colour through the combiners (subtle on the day tracks; GCN footage agrees)
+- ~~2-second hitch + most audio underruns~~: the kernel's 2 s summary print (now RECOMP_KERNEL_SUMMARY=1 only).
+  Underruns 80-120 -> 2-3 per session
+
+## Milestone: first BETA
+Ship when **arcade mode is playable without stutters**. The beta also brings the clang build and the companion
+app (verify + build). After the beta: test garage life (expect more unrecompiled indirect-call targets there).
+
+Open, in order:
+1. **recomp_0012.c at /O1** (suspected CRI audio decoder, still /Od): `-DAM_GEN_NOOPT_FLAGS="/O1;/Ob0"`; time the build
+2. **APU MMIO without exceptions**: ~20,000 traps/s in races (100k per 5 s), est. 10-20% of a core
+3. **GPU vertex programs**: races 28-57 fps, dips in busy sections; vertex work is all on the CPU
+4. **cli/sti as real interrupt masking**: XPP (USB driver) guards its lists with cli/sti, emitted as no-ops; the
+   OHCI model's interrupt thread can land inside -> the occasional startup crash and startup hang (0 flips)
+5. **Audio hangs** (a voice keeps looping, after race/quit): re-check after 1-2; if still there, log voice
+   start/stop to find the stop that never arrives
+6. Clang build (llvm-mingw / clang-cl; also the Switch toolchain) + companion app
+7. Later: honest sub_00209540, Switch branch
 
 ## D3D11 back end v1 (src/d3d11_backend.c)
 - Opt-in: `.\scripts\run.ps1 -D3D11` (sets AM_D3D11=1, turns off RECOMP_FB_WINDOW; main.c registers it before the game starts)
