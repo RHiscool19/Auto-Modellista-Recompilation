@@ -1,4 +1,10 @@
+<p align="center">
+  <img src="assets/amr-icon-sub.svg" alt="amr: auto modellista recompiled" width="320">
+</p>
+
 # Auto Modellista Recompilation
+
+> Unofficial fan project. Auto Modellista is © Capcom; this project is not affiliated with or endorsed by Capcom.
 
 A static recompilation of **Auto Modellista** (Capcom, 2003, original Xbox, USA/Japan release) into a native Windows executable, built on the [xboxrecomp](https://github.com/sp00nznet/xboxrecomp) toolkit.
 
