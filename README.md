@@ -169,6 +169,16 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run.ps1 -D3D11
 - **Occasional crash at startup** in the USB interrupt path, likely a timing race. Relaunching works.
 - **Xbox Live** features are not supported.
 
+## Artists wanted
+
+Want to make art for the project, such as texture redraws, HD remakes of menu graphics, or icons and banners? Get in touch by [opening an issue](https://github.com/RHiscool19/Auto-Modellista-Recompilation/issues/new) on this repository with a short note about what you'd like to work on and a link to some of your work.
+
+A few ground rules, so everything can be shared openly:
+
+- **Original work only.** Redraw textures by hand or from your own photos and references. Ripped game files, and upscales or edits of them, can't be accepted, because they contain Capcom's data.
+- **No official logos or trademarks** (Capcom's or real car makers' badges).
+- **You'll be credited** here and in the companion app, and you keep the rights to your work. Say which licence you're happy to share it under.
+
 ## Credits
 
 - [xboxrecomp](https://github.com/sp00nznet/xboxrecomp) by sp00nz and contributors (MIT), which does the heavy lifting: the recompiler and the runtime libraries. Parts of its audio and GPU code come from [xemu](https://xemu.app) (LGPL-2.1+).
