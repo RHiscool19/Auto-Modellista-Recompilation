@@ -66,6 +66,7 @@ set(GAME_SOURCES
     src/am_overrides.c
     src/d3d11_backend.c
     src/am_profiler.c
+    src/app.rc          # exe icon (assets/amr.ico)
     # Add game-specific sources here, e.g.:
     # src/asset_loader.c
     # src/custom_renderer.c

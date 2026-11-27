@@ -307,6 +307,7 @@ Status:
 - [x] toolkit fork: RHiscool19/xboxrecomp, branch automodellista (11dfafe); patches/ kept one release
 - [ ] llvm-mingw build (the redistributable toolchain the app ships)
 - [ ] runtime + D3D11 back end as a prebuilt static library (built with llvm-mingw)
+- [x] icon: assets/amr.ico (own art, assets/amr-icon*.svg) via src/app.rc; D3D11 window class hIcon. CPU-mode window (toolkit fb_present.c) still default icon. Use amr-icon-sub.svg for the app header/README banner.
 - [ ] app (Python + tkinter, PyInstaller with capstone + xboxrecomp tools): pick ISO/folder -> verify SHA-1 ->
       extract (own XDVDFS reader) -> regen -> compile generated C -> link -> write folder + ini
 - Deferred to after the beta (2026-11-26): single-sound audio hang. Rare and random (one sound loops while music and

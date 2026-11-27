@@ -368,6 +368,7 @@ static int init(void)
     wc.lpfnWndProc = wndproc;
     wc.hInstance = GetModuleHandleA(NULL);
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hIcon = LoadIconA(wc.hInstance, MAKEINTRESOURCEA(1));   /* src/app.rc */
     wc.lpszClassName = "AMD3D11";
     RegisterClassA(&wc);
     AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
